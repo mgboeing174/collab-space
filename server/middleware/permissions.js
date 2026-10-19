@@ -1,94 +1,125 @@
-import db from '../db/database.js';
+import Workspace from '../models/Workspace.js';
+import Document from '../models/Document.js';
+import Whiteboard from '../models/Whiteboard.js';
 
 export function requireWorkspaceMember(requiredRoles = []) {
-  return (req, res, next) => {
-    const workspaceId = req.params.workspaceId || req.body.workspaceId || req.query.workspaceId || req.headers['x-workspace-id'];
+  return async (req, res, next) => {
+    try {
+      const workspaceId = req.params.workspaceId || req.body.workspaceId || req.query.workspaceId || req.headers['x-workspace-id'];
 
-    if (!workspaceId) {
-      return res.status(400).json({ error: 'Workspace ID is required.' });
+      if (!workspaceId) {
+        return res.status(400).json({ error: 'Workspace ID is required.' });
+      }
+
+      const workspace = await Workspace.findById(workspaceId);
+      if (!workspace) {
+        return res.status(404).json({ error: 'Workspace not found.' });
+      }
+
+      const membership = workspace.members.find(
+        (m) => m.userId.toString() === req.user.id
+      );
+
+      if (!membership) {
+        return res.status(403).json({ error: 'You do not have access to this workspace.' });
+      }
+
+      if (requiredRoles.length > 0 && !requiredRoles.includes(membership.role)) {
+        return res.status(403).json({ error: `Insufficient permissions. Required role: ${requiredRoles.join(' or ')}` });
+      }
+
+      req.workspace = workspace;
+      req.workspaceMember = {
+        workspaceId: workspace._id.toString(),
+        role: membership.role,
+        workspaceName: workspace.name,
+        isOwner: membership.role === 'owner'
+      };
+
+      next();
+    } catch (err) {
+      console.error('requireWorkspaceMember error:', err);
+      return res.status(500).json({ error: 'Authorization check failed.' });
+    }
+  };
+}
+
+export async function requireDocumentAccess(req, res, next) {
+  try {
+    const documentId = req.params.id || req.params.documentId || req.body.documentId;
+
+    if (!documentId) {
+      return res.status(400).json({ error: 'Document ID is required.' });
     }
 
-    const stmt = db.prepare(`
-      SELECT wm.role, wm.workspace_id, w.name as workspace_name, w.owner_id
-      FROM workspace_members wm
-      JOIN workspaces w ON w.id = wm.workspace_id
-      WHERE wm.workspace_id = ? AND wm.user_id = ?
-    `);
-    const membership = stmt.get(workspaceId, req.user.id);
+    const doc = await Document.findById(documentId);
+    if (!doc) {
+      return res.status(404).json({ error: 'Document not found.' });
+    }
+
+    const workspace = await Workspace.findById(doc.workspaceId);
+    if (!workspace) {
+      return res.status(403).json({ error: 'Associated workspace not found.' });
+    }
+
+    const membership = workspace.members.find(
+      (m) => m.userId.toString() === req.user.id
+    );
 
     if (!membership) {
-      return res.status(403).json({ error: 'You do not have access to this workspace.' });
+      return res.status(403).json({ error: 'You do not have access to this document.' });
     }
 
-    if (requiredRoles.length > 0 && !requiredRoles.includes(membership.role)) {
-      return res.status(403).json({ error: `Insufficient permissions. Required role: ${requiredRoles.join(' or ')}` });
-    }
-
+    req.document = doc;
     req.workspaceMember = {
-      workspaceId: membership.workspace_id,
+      workspaceId: doc.workspaceId.toString(),
       role: membership.role,
-      workspaceName: membership.workspace_name,
       isOwner: membership.role === 'owner'
     };
 
     next();
-  };
+  } catch (err) {
+    console.error('requireDocumentAccess error:', err);
+    return res.status(500).json({ error: 'Document access check failed.' });
+  }
 }
 
-export function requireDocumentAccess(req, res, next) {
-  const documentId = req.params.id || req.params.documentId || req.body.documentId;
+export async function requireWhiteboardAccess(req, res, next) {
+  try {
+    const whiteboardId = req.params.id || req.params.whiteboardId || req.body.whiteboardId;
 
-  if (!documentId) {
-    return res.status(400).json({ error: 'Document ID is required.' });
+    if (!whiteboardId) {
+      return res.status(400).json({ error: 'Whiteboard ID is required.' });
+    }
+
+    const whiteboard = await Whiteboard.findById(whiteboardId);
+    if (!whiteboard) {
+      return res.status(404).json({ error: 'Whiteboard not found.' });
+    }
+
+    const workspace = await Workspace.findById(whiteboard.workspaceId);
+    if (!workspace) {
+      return res.status(403).json({ error: 'Associated workspace not found.' });
+    }
+
+    const membership = workspace.members.find(
+      (m) => m.userId.toString() === req.user.id
+    );
+
+    if (!membership) {
+      return res.status(403).json({ error: 'You do not have access to this whiteboard.' });
+    }
+
+    req.whiteboard = whiteboard;
+    req.workspaceMember = {
+      workspaceId: whiteboard.workspaceId.toString(),
+      role: membership.role,
+      isOwner: membership.role === 'owner'
+    };
+
+    next();
+  } catch (err) {
+    console.error('requireWhiteboardAccess error:', err);
+    return res.status(500).json({ error: 'Whiteboard access check failed.' });
   }
-
-  const docStmt = db.prepare(`
-    SELECT d.*, wm.role as member_role
-    FROM documents d
-    JOIN workspace_members wm ON wm.workspace_id = d.workspace_id AND wm.user_id = ?
-    WHERE d.id = ?
-  `);
-  const doc = docStmt.get(req.user.id, documentId);
-
-  if (!doc) {
-    return res.status(403).json({ error: 'Document not found or you lack permission to view it.' });
-  }
-
-  req.document = doc;
-  req.workspaceMember = {
-    workspaceId: doc.workspace_id,
-    role: doc.member_role,
-    isOwner: doc.member_role === 'owner'
-  };
-
-  next();
-}
-
-export function requireWhiteboardAccess(req, res, next) {
-  const whiteboardId = req.params.id || req.params.whiteboardId || req.body.whiteboardId;
-
-  if (!whiteboardId) {
-    return res.status(400).json({ error: 'Whiteboard ID is required.' });
-  }
-
-  const wbStmt = db.prepare(`
-    SELECT w.*, wm.role as member_role
-    FROM whiteboards w
-    JOIN workspace_members wm ON wm.workspace_id = w.workspace_id AND wm.user_id = ?
-    WHERE w.id = ?
-  `);
-  const whiteboard = wbStmt.get(req.user.id, whiteboardId);
-
-  if (!whiteboard) {
-    return res.status(403).json({ error: 'Whiteboard not found or you lack permission to view it.' });
-  }
-
-  req.whiteboard = whiteboard;
-  req.workspaceMember = {
-    workspaceId: whiteboard.workspace_id,
-    role: whiteboard.member_role,
-    isOwner: whiteboard.member_role === 'owner'
-  };
-
-  next();
 }

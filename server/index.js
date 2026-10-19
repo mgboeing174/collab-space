@@ -6,7 +6,7 @@ import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { initDatabase } from './db/database.js';
+import { connectDB } from './db/database.js';
 import authRoutes from './routes/auth.js';
 import workspaceRoutes from './routes/workspaces.js';
 import documentRoutes from './routes/documents.js';
@@ -18,8 +18,8 @@ import { setupSockets } from './sockets/socketHandler.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize SQLite database
-initDatabase();
+// Connect to MongoDB
+await connectDB();
 
 const app = express();
 const server = http.createServer(app);
@@ -34,11 +34,10 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl) or in allowed list
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(null, true); // Dev-friendly permissive CORS
+      callback(null, true);
     }
   },
   credentials: true
@@ -68,7 +67,6 @@ const io = new SocketIOServer(server, {
 
 setupSockets(io);
 
-// Make io accessible in request if needed
 app.use((req, res, next) => {
   req.io = io;
   next();
@@ -76,7 +74,12 @@ app.use((req, res, next) => {
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'CollabSpace API', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    database: 'MongoDB',
+    service: 'CollabSpace API',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Mount Routes
@@ -113,5 +116,5 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`>>> CollabSpace backend server running on http://localhost:${PORT}`);
+  console.log(`>>> CollabSpace backend server running with MongoDB on http://localhost:${PORT}`);
 });

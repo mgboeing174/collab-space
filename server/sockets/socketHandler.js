@@ -1,39 +1,36 @@
 import jwt from 'jsonwebtoken';
-import db from '../db/database.js';
+import User from '../models/User.js';
+import Workspace from '../models/Workspace.js';
+import Document from '../models/Document.js';
+import Whiteboard from '../models/Whiteboard.js';
 import { JWT_SECRET } from '../middleware/auth.js';
 
-// Map of active sockets: socketId -> { userId, userName, avatarColor, activeRooms: Set }
 const connectedUsers = new Map();
-
-// Map of room presence: roomKey -> Map(socketId -> { userId, userName, avatarColor, cursor, lastActive })
 const roomPresence = new Map();
 
 export function setupSockets(io) {
-  // Socket authentication middleware
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.replace('Bearer ', '');
       if (!token) {
         return next(new Error('Authentication token required'));
       }
 
-      jwt.verify(token, JWT_SECRET, (err, decoded) => {
+      jwt.verify(token, JWT_SECRET, async (err, decoded) => {
         if (err || !decoded) {
           return next(new Error('Invalid token'));
         }
 
-        const userStmt = db.prepare('SELECT id, name, email, avatar_color FROM users WHERE id = ?');
-        const user = userStmt.get(decoded.id);
-
+        const user = await User.findById(decoded.id);
         if (!user) {
           return next(new Error('User not found'));
         }
 
         socket.user = {
-          id: user.id,
+          id: user._id.toString(),
           name: user.name,
           email: user.email,
-          avatarColor: user.avatar_color
+          avatarColor: user.avatarColor
         };
         next();
       });
@@ -50,16 +47,12 @@ export function setupSockets(io) {
       activeRooms: new Set()
     });
 
-    // ==========================================
-    // WORKSPACE PRESENCE & NOTIFICATIONS
-    // ==========================================
-    socket.on('join_workspace', ({ workspaceId }) => {
+    // WORKSPACE PRESENCE
+    socket.on('join_workspace', async ({ workspaceId }) => {
       if (!workspaceId) return;
 
-      // Verify workspace membership
-      const checkStmt = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?');
-      const membership = checkStmt.get(workspaceId, user.id);
-      if (!membership) {
+      const workspace = await Workspace.findById(workspaceId);
+      if (!workspace || !workspace.members.some((m) => m.userId.toString() === user.id)) {
         socket.emit('error', { message: 'Unauthorized workspace access' });
         return;
       }
@@ -78,7 +71,6 @@ export function setupSockets(io) {
         joinedAt: Date.now()
       });
 
-      // Broadcast updated workspace presence list
       const onlineMembers = Array.from(roomPresence.get(roomKey).values());
       io.to(roomKey).emit('workspace_presence_update', { workspaceId, onlineMembers });
     });
@@ -95,9 +87,7 @@ export function setupSockets(io) {
       }
     });
 
-    // ==========================================
-    // DOCUMENT COLLABORATION & SECTION LOCKING
-    // ==========================================
+    // DOCUMENT COLLABORATION
     socket.on('join_document', ({ documentId }) => {
       if (!documentId) return;
 
@@ -124,15 +114,8 @@ export function setupSockets(io) {
       handleLeaveDocument(socket, documentId);
     });
 
-    // Live cursor movement inside document
     socket.on('document_cursor_move', ({ documentId, cursor, activeSectionId }) => {
       const roomKey = `doc:${documentId}`;
-      const room = roomPresence.get(roomKey);
-      if (room && room.has(socket.id)) {
-        const uData = room.get(socket.id);
-        uData.cursor = cursor;
-        uData.activeSectionId = activeSectionId;
-      }
       socket.to(roomKey).emit('document_cursor_update', {
         userId: user.id,
         userName: user.name,
@@ -143,33 +126,32 @@ export function setupSockets(io) {
     });
 
     // Acquire lock on section
-    socket.on('claim_section_lock', ({ documentId, sectionId }) => {
+    socket.on('claim_section_lock', async ({ documentId, sectionId }) => {
       try {
-        const cutoff = new Date(Date.now() - 60000).toISOString();
-        const sec = db.prepare('SELECT * FROM document_sections WHERE id = ? AND document_id = ?').get(sectionId, documentId);
+        const cutoff = new Date(Date.now() - 60000);
+        const doc = await Document.findById(documentId);
+        if (!doc) return;
 
-        if (!sec) {
-          socket.emit('lock_error', { sectionId, message: 'Section not found' });
-          return;
-        }
+        const sec = doc.sections.id(sectionId);
+        if (!sec) return;
 
-        // Check if locked by someone else and lock is still fresh (<60s)
-        if (sec.locked_by && sec.locked_by !== user.id && sec.locked_at && sec.lock_heartbeat > cutoff) {
+        // If locked by someone else and still fresh
+        if (sec.lockedBy && sec.lockedBy.toString() !== user.id && sec.lockedAt && sec.lockHeartbeat > cutoff) {
           socket.emit('lock_rejected', {
             sectionId,
-            message: `Locked by ${sec.locked_by_name || 'another editor'}`,
-            lockedBy: sec.locked_by,
-            lockedByName: sec.locked_by_name
+            message: `Locked by ${sec.lockedByName || 'another editor'}`,
+            lockedBy: sec.lockedBy.toString(),
+            lockedByName: sec.lockedByName
           });
           return;
         }
 
-        const now = new Date().toISOString();
-        db.prepare(`
-          UPDATE document_sections
-          SET locked_by = ?, locked_by_name = ?, locked_at = ?, lock_heartbeat = ?
-          WHERE id = ?
-        `).run(user.id, user.name, now, now, sectionId);
+        const now = new Date();
+        sec.lockedBy = user.id;
+        sec.lockedByName = user.name;
+        sec.lockedAt = now;
+        sec.lockHeartbeat = now;
+        await doc.save();
 
         const roomKey = `doc:${documentId}`;
         io.to(roomKey).emit('section_lock_acquired', {
@@ -178,33 +160,37 @@ export function setupSockets(io) {
           lockedBy: user.id,
           lockedByName: user.name,
           avatarColor: user.avatarColor,
-          lockedAt: now
+          lockedAt: now.toISOString()
         });
       } catch (err) {
         console.error('Error claiming section lock:', err);
       }
     });
 
-    // Heartbeat lock to prevent expiration
-    socket.on('heartbeat_section_lock', ({ documentId, sectionId }) => {
+    // Heartbeat lock
+    socket.on('heartbeat_section_lock', async ({ documentId, sectionId }) => {
       try {
-        const now = new Date().toISOString();
-        db.prepare(`
-          UPDATE document_sections
-          SET lock_heartbeat = ?
-          WHERE id = ? AND locked_by = ?
-        `).run(now, sectionId, user.id);
+        await Document.updateOne(
+          { _id: documentId, 'sections._id': sectionId, 'sections.lockedBy': user.id },
+          { $set: { 'sections.$.lockHeartbeat': new Date() } }
+        );
       } catch (e) {}
     });
 
     // Release lock on section
-    socket.on('release_section_lock', ({ documentId, sectionId }) => {
+    socket.on('release_section_lock', async ({ documentId, sectionId }) => {
       try {
-        db.prepare(`
-          UPDATE document_sections
-          SET locked_by = NULL, locked_by_name = NULL, locked_at = NULL, lock_heartbeat = NULL
-          WHERE id = ? AND document_id = ? AND locked_by = ?
-        `).run(sectionId, documentId, user.id);
+        await Document.updateOne(
+          { _id: documentId, 'sections._id': sectionId, 'sections.lockedBy': user.id },
+          {
+            $set: {
+              'sections.$.lockedBy': null,
+              'sections.$.lockedByName': null,
+              'sections.$.lockedAt': null,
+              'sections.$.lockHeartbeat': null
+            }
+          }
+        );
 
         const roomKey = `doc:${documentId}`;
         io.to(roomKey).emit('section_lock_released', {
@@ -218,61 +204,53 @@ export function setupSockets(io) {
     });
 
     // Real-time section content update broadcast
-    socket.on('section_content_update', ({ documentId, sectionId, content, title, version }) => {
+    socket.on('section_content_update', async ({ documentId, sectionId, content, title, version }) => {
       try {
-        const sec = db.prepare('SELECT version, locked_by FROM document_sections WHERE id = ?').get(sectionId);
+        const doc = await Document.findById(documentId);
+        if (!doc) return;
+
+        const sec = doc.sections.id(sectionId);
         if (!sec) return;
 
-        // If locked by someone else, ignore
-        if (sec.locked_by && sec.locked_by !== user.id) {
+        if (sec.lockedBy && sec.lockedBy.toString() !== user.id) {
           return;
         }
 
-        const nextVersion = (sec.version || 0) + 1;
-        const now = new Date().toISOString();
-
-        db.prepare(`
-          UPDATE document_sections
-          SET content = COALESCE(?, content),
-              title = COALESCE(?, title),
-              version = ?,
-              updated_at = ?
-          WHERE id = ?
-        `).run(content !== undefined ? content : null, title !== undefined ? title : null, nextVersion, now, sectionId);
-
-        db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(now, documentId);
+        if (content !== undefined) sec.content = content;
+        if (title !== undefined) sec.title = title;
+        sec.version = (sec.version || 0) + 1;
+        sec.updatedAt = new Date();
+        await doc.save();
 
         const roomKey = `doc:${documentId}`;
-        // Broadcast change to other users in the document room
         socket.to(roomKey).emit('section_updated', {
           documentId,
           sectionId,
           content,
           title,
-          version: nextVersion,
+          version: sec.version,
           updatedBy: user.id,
           updatedByName: user.name,
-          updatedAt: now
+          updatedAt: sec.updatedAt.toISOString()
         });
 
-        // Acknowledge back to sender with confirmed version
         socket.emit('section_saved_ack', {
           sectionId,
-          version: nextVersion,
-          timestamp: now
+          version: sec.version,
+          timestamp: sec.updatedAt.toISOString()
         });
       } catch (err) {
         console.error('Error in section_content_update:', err);
       }
     });
 
-    // Reorder sections broadcast
+    // Reorder broadcast
     socket.on('sections_reordered', ({ documentId, sectionIds }) => {
       const roomKey = `doc:${documentId}`;
       socket.to(roomKey).emit('sections_order_updated', { documentId, sectionIds });
     });
 
-    // Section assignment broadcast
+    // Assignment broadcast
     socket.on('section_assigned', ({ documentId, sectionId, assignedTo, assignedName }) => {
       const roomKey = `doc:${documentId}`;
       io.to(roomKey).emit('section_assignment_updated', {
@@ -283,9 +261,7 @@ export function setupSockets(io) {
       });
     });
 
-    // ==========================================
-    // WHITEBOARD COLLABORATION & LIVE CURSORS
-    // ==========================================
+    // WHITEBOARD COLLABORATION
     socket.on('join_whiteboard', ({ whiteboardId }) => {
       if (!whiteboardId) return;
 
@@ -319,7 +295,6 @@ export function setupSockets(io) {
       }
     });
 
-    // Real-time whiteboard cursor
     socket.on('whiteboard_cursor_move', ({ whiteboardId, x, y }) => {
       const roomKey = `board:${whiteboardId}`;
       socket.to(roomKey).emit('whiteboard_cursor_update', {
@@ -331,7 +306,6 @@ export function setupSockets(io) {
       });
     });
 
-    // Real-time whiteboard element actions
     socket.on('whiteboard_element_add', ({ whiteboardId, element }) => {
       const roomKey = `board:${whiteboardId}`;
       socket.to(roomKey).emit('whiteboard_element_added', { whiteboardId, element });
@@ -347,11 +321,12 @@ export function setupSockets(io) {
       socket.to(roomKey).emit('whiteboard_element_deleted', { whiteboardId, elementId });
     });
 
-    socket.on('whiteboard_elements_bulk_sync', ({ whiteboardId, elements }) => {
+    socket.on('whiteboard_elements_bulk_sync', async ({ whiteboardId, elements }) => {
       try {
-        const dataStr = JSON.stringify(elements);
-        const now = new Date().toISOString();
-        db.prepare('UPDATE whiteboards SET canvas_data = ?, updated_at = ? WHERE id = ?').run(dataStr, now, whiteboardId);
+        await Whiteboard.findByIdAndUpdate(whiteboardId, {
+          canvasData: elements,
+          $inc: { version: 1 }
+        });
 
         const roomKey = `board:${whiteboardId}`;
         socket.to(roomKey).emit('whiteboard_synced', { whiteboardId, elements });
@@ -360,26 +335,30 @@ export function setupSockets(io) {
       }
     });
 
-    // ==========================================
-    // DISCONNECTION CLEANUP & SAFE LOCK RELEASE
-    // ==========================================
-    socket.on('disconnect', () => {
+    // DISCONNECTION CLEANUP
+    socket.on('disconnect', async () => {
       const userMeta = connectedUsers.get(socket.id);
       if (userMeta) {
-        // Automatically release any locks held by this user in database
         try {
-          const lockedSections = db.prepare('SELECT id, document_id FROM document_sections WHERE locked_by = ?').all(user.id);
-          if (lockedSections.length > 0) {
-            db.prepare(`
-              UPDATE document_sections
-              SET locked_by = NULL, locked_by_name = NULL, locked_at = NULL, lock_heartbeat = NULL
-              WHERE locked_by = ?
-            `).run(user.id);
+          // Release any active locks in documents
+          const lockedDocs = await Document.find({ 'sections.lockedBy': user.id });
+          if (lockedDocs.length > 0) {
+            await Document.updateMany(
+              { 'sections.lockedBy': user.id },
+              {
+                $set: {
+                  'sections.$[elem].lockedBy': null,
+                  'sections.$[elem].lockedByName': null,
+                  'sections.$[elem].lockedAt': null,
+                  'sections.$[elem].lockHeartbeat': null
+                }
+              },
+              { arrayFilters: [{ 'elem.lockedBy': user.id }] }
+            );
 
-            lockedSections.forEach(sec => {
-              io.to(`doc:${sec.document_id}`).emit('section_lock_released', {
-                documentId: sec.document_id,
-                sectionId: sec.id,
+            lockedDocs.forEach((d) => {
+              io.to(`doc:${d._id.toString()}`).emit('section_lock_released', {
+                documentId: d._id.toString(),
                 releasedBy: user.id,
                 reason: 'disconnect'
               });
@@ -389,7 +368,7 @@ export function setupSockets(io) {
           console.error('Error releasing disconnect locks:', e);
         }
 
-        // Clean up room presence for all rooms this socket was in
+        // Clean up presence
         for (const roomKey of userMeta.activeRooms) {
           if (roomPresence.has(roomKey)) {
             roomPresence.get(roomKey).delete(socket.id);
@@ -414,7 +393,7 @@ export function setupSockets(io) {
   });
 }
 
-function handleLeaveDocument(socket, documentId) {
+async function handleLeaveDocument(socket, documentId) {
   const roomKey = `doc:${documentId}`;
   socket.leave(roomKey);
   connectedUsers.get(socket.id)?.activeRooms.delete(roomKey);
@@ -425,15 +404,21 @@ function handleLeaveDocument(socket, documentId) {
     socket.to(roomKey).emit('document_presence_update', { documentId, activeUsers: docUsers });
   }
 
-  // Release locks held by user in this document
   try {
     const user = socket.user;
     if (user) {
-      db.prepare(`
-        UPDATE document_sections
-        SET locked_by = NULL, locked_by_name = NULL, locked_at = NULL, lock_heartbeat = NULL
-        WHERE document_id = ? AND locked_by = ?
-      `).run(documentId, user.id);
+      await Document.updateOne(
+        { _id: documentId, 'sections.lockedBy': user.id },
+        {
+          $set: {
+            'sections.$[elem].lockedBy': null,
+            'sections.$[elem].lockedByName': null,
+            'sections.$[elem].lockedAt': null,
+            'sections.$[elem].lockHeartbeat': null
+          }
+        },
+        { arrayFilters: [{ 'elem.lockedBy': user.id }] }
+      );
 
       socket.to(roomKey).emit('section_lock_released', {
         documentId,

@@ -2,7 +2,11 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import db, { logActivity } from '../db/database.js';
+import User from '../models/User.js';
+import Workspace from '../models/Workspace.js';
+import Document from '../models/Document.js';
+import Whiteboard from '../models/Whiteboard.js';
+import { logActivity } from '../db/database.js';
 import { JWT_SECRET, authenticateToken } from '../middleware/auth.js';
 import { DOCUMENT_TEMPLATES } from '../db/templates.js';
 
@@ -26,77 +30,61 @@ router.post('/register', async (req, res) => {
 
     const emailClean = email.toLowerCase().trim();
 
-    // Check if user exists
-    const checkStmt = db.prepare('SELECT id FROM users WHERE email = ?');
-    const existing = checkStmt.get(emailClean);
+    const existing = await User.findOne({ email: emailClean });
     if (existing) {
       return res.status(409).json({ error: 'An account with this email already exists.' });
     }
 
-    const userId = crypto.randomUUID();
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
     const avatarColor = AVATAR_PALETTE[Math.floor(Math.random() * AVATAR_PALETTE.length)];
-    const now = new Date().toISOString();
 
-    const insertUser = db.prepare(`
-      INSERT INTO users (id, email, password_hash, name, avatar_color, bio, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, '', ?, ?)
-    `);
-    insertUser.run(userId, emailClean, passwordHash, name.trim(), avatarColor, now, now);
-
-    // Create a default initial workspace for new user
-    const workspaceId = crypto.randomUUID();
-    const inviteCode = crypto.randomBytes(6).toString('hex');
-    const insertWorkspace = db.prepare(`
-      INSERT INTO workspaces (id, name, description, invite_code, owner_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertWorkspace.run(workspaceId, `${name.trim()}'s Workspace`, 'Personal workspace for real-time collaboration', inviteCode, userId, now, now);
-
-    const insertMember = db.prepare(`
-      INSERT INTO workspace_members (id, workspace_id, user_id, role, joined_at)
-      VALUES (?, ?, ?, 'owner', ?)
-    `);
-    insertMember.run(crypto.randomUUID(), workspaceId, userId, now);
-
-    // Create an initial starter document from "Meeting Notes" template
-    const docId = crypto.randomUUID();
-    const template = DOCUMENT_TEMPLATES['meeting-notes'];
-    const insertDoc = db.prepare(`
-      INSERT INTO documents (id, workspace_id, project_id, title, template_type, version, created_by, created_at, updated_at)
-      VALUES (?, ?, NULL, ?, 'meeting-notes', 1, ?, ?, ?)
-    `);
-    insertDoc.run(docId, workspaceId, 'Welcome & Sprint Planning Sync', userId, now, now);
-
-    const insertSection = db.prepare(`
-      INSERT INTO document_sections (id, document_id, section_key, title, content, order_index, assigned_to, assigned_name, version, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `);
-
-    template.sections.forEach((s, idx) => {
-      insertSection.run(
-        crypto.randomUUID(),
-        docId,
-        s.key,
-        s.title,
-        s.content,
-        idx,
-        idx === 0 ? userId : null,
-        idx === 0 ? name.trim() : null,
-        now
-      );
+    const user = await User.create({
+      name: name.trim(),
+      email: emailClean,
+      passwordHash,
+      avatarColor,
+      bio: ''
     });
 
-    // Create an initial whiteboard
-    const wbId = crypto.randomUUID();
-    const insertWb = db.prepare(`
-      INSERT INTO whiteboards (id, workspace_id, project_id, title, canvas_data, version, created_by, created_at, updated_at)
-      VALUES (?, ?, NULL, ?, ?, 1, ?, ?, ?)
-    `);
-    
-    // Seed initial whiteboard with a welcome note & shapes
-    const initialWbData = JSON.stringify([
+    const inviteCode = crypto.randomBytes(6).toString('hex');
+    const workspace = await Workspace.create({
+      name: `${name.trim()}'s Workspace`,
+      description: 'Personal workspace for real-time collaboration',
+      inviteCode,
+      ownerId: user._id,
+      members: [
+        {
+          userId: user._id,
+          role: 'owner',
+          joinedAt: new Date()
+        }
+      ]
+    });
+
+    // Create starter document with template
+    const template = DOCUMENT_TEMPLATES['meeting-notes'];
+    const sectionsToInsert = template.sections.map((s, idx) => ({
+      sectionKey: s.key,
+      title: s.title,
+      content: s.content,
+      orderIndex: idx,
+      assignedTo: idx === 0 ? user._id : null,
+      assignedName: idx === 0 ? name.trim() : null,
+      version: 1
+    }));
+
+    await Document.create({
+      workspaceId: workspace._id,
+      title: 'Welcome & Sprint Planning Sync',
+      templateType: 'meeting-notes',
+      version: 1,
+      createdBy: user._id,
+      sections: sectionsToInsert
+    });
+
+    // Create starter whiteboard
+    const initialWbData = [
       {
         id: crypto.randomUUID(),
         type: 'sticky',
@@ -138,28 +126,35 @@ router.post('/register', async (req, res) => {
         y: 100,
         width: 200,
         height: 120,
-        text: 'Real-Time Sync (Socket.IO)',
+        text: 'MongoDB + Socket.IO',
         fillColor: '#242424',
         strokeColor: '#000000',
         textColor: '#ffffff',
         strokeWidth: 2
       }
-    ]);
-    insertWb.run(wbId, workspaceId, 'Architecture & Ideas Board', initialWbData, userId, now, now);
+    ];
 
-    logActivity({
-      workspaceId,
-      userId,
-      userName: name.trim(),
+    await Whiteboard.create({
+      workspaceId: workspace._id,
+      title: 'Architecture & Ideas Board',
+      canvasData: initialWbData,
+      version: 1,
+      createdBy: user._id
+    });
+
+    await logActivity({
+      workspaceId: workspace._id,
+      userId: user._id,
+      userName: user.name,
       action: 'workspace_created',
       entityType: 'workspace',
-      entityId: workspaceId,
-      entityTitle: `${name.trim()}'s Workspace`,
+      entityId: workspace._id,
+      entityTitle: workspace.name,
       details: 'Created initial workspace and starter documents'
     });
 
     const token = jwt.sign(
-      { id: userId, email: emailClean, name: name.trim() },
+      { id: user._id.toString(), email: user.email, name: user.name },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -167,13 +162,13 @@ router.post('/register', async (req, res) => {
     res.status(201).json({
       token,
       user: {
-        id: userId,
-        email: emailClean,
-        name: name.trim(),
-        avatarColor,
-        bio: ''
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        avatarColor: user.avatarColor,
+        bio: user.bio
       },
-      defaultWorkspaceId: workspaceId
+      defaultWorkspaceId: workspace._id.toString()
     });
   } catch (err) {
     console.error('Registration error:', err);
@@ -190,20 +185,19 @@ router.post('/login', async (req, res) => {
     }
 
     const emailClean = email.toLowerCase().trim();
-    const stmt = db.prepare('SELECT * FROM users WHERE email = ?');
-    const user = stmt.get(emailClean);
+    const user = await User.findOne({ email: emailClean });
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password_hash);
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
     const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name },
+      { id: user._id.toString(), email: user.email, name: user.name },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -211,10 +205,10 @@ router.post('/login', async (req, res) => {
     res.json({
       token,
       user: {
-        id: user.id,
+        id: user._id.toString(),
         email: user.email,
         name: user.name,
-        avatarColor: user.avatar_color,
+        avatarColor: user.avatarColor,
         bio: user.bio || ''
       }
     });
@@ -228,30 +222,28 @@ router.get('/me', authenticateToken, (req, res) => {
   res.json({ user: req.user });
 });
 
-router.put('/profile', authenticateToken, (req, res) => {
+router.put('/profile', authenticateToken, async (req, res) => {
   try {
     const { name, bio, avatarColor } = req.body;
-    const now = new Date().toISOString();
 
-    const stmt = db.prepare(`
-      UPDATE users
-      SET name = COALESCE(?, name),
-          bio = COALESCE(?, bio),
-          avatar_color = COALESCE(?, avatar_color),
-          updated_at = ?
-      WHERE id = ?
-    `);
-    stmt.run(name ? name.trim() : null, bio !== undefined ? bio.trim() : null, avatarColor || null, now, req.user.id);
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
 
-    const updated = db.prepare('SELECT id, email, name, avatar_color, bio FROM users WHERE id = ?').get(req.user.id);
+    if (name) user.name = name.trim();
+    if (bio !== undefined) user.bio = bio.trim();
+    if (avatarColor) user.avatarColor = avatarColor;
+
+    await user.save();
 
     res.json({
       user: {
-        id: updated.id,
-        email: updated.email,
-        name: updated.name,
-        avatarColor: updated.avatar_color,
-        bio: updated.bio
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        avatarColor: user.avatarColor,
+        bio: user.bio
       }
     });
   } catch (err) {

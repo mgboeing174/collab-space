@@ -1,6 +1,9 @@
 import express from 'express';
-import crypto from 'crypto';
-import db, { logActivity } from '../db/database.js';
+import Document from '../models/Document.js';
+import DocumentVersion from '../models/DocumentVersion.js';
+import Workspace from '../models/Workspace.js';
+import User from '../models/User.js';
+import { logActivity } from '../db/database.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireWorkspaceMember, requireDocumentAccess } from '../middleware/permissions.js';
 import { DOCUMENT_TEMPLATES } from '../db/templates.js';
@@ -8,126 +11,131 @@ import { DOCUMENT_TEMPLATES } from '../db/templates.js';
 const router = express.Router();
 router.use(authenticateToken);
 
-// Helper to clean up expired section locks (older than 60s)
-function cleanExpiredLocks(documentId) {
+// Helper to clean expired section locks (>60s)
+async function cleanExpiredLocks(documentId) {
   try {
-    const cutoff = new Date(Date.now() - 60000).toISOString();
-    const updateStmt = db.prepare(`
-      UPDATE document_sections
-      SET locked_by = NULL, locked_by_name = NULL, locked_at = NULL, lock_heartbeat = NULL
-      WHERE document_id = ? AND locked_at IS NOT NULL AND (lock_heartbeat < ? OR lock_heartbeat IS NULL)
-    `);
-    updateStmt.run(documentId, cutoff);
+    const cutoff = new Date(Date.now() - 60000);
+    await Document.updateOne(
+      { _id: documentId },
+      {
+        $set: {
+          'sections.$[elem].lockedBy': null,
+          'sections.$[elem].lockedByName': null,
+          'sections.$[elem].lockedAt': null,
+          'sections.$[elem].lockHeartbeat': null
+        }
+      },
+      {
+        arrayFilters: [
+          {
+            'elem.lockedAt': { $ne: null },
+            $or: [{ 'elem.lockHeartbeat': { $lt: cutoff } }, { 'elem.lockHeartbeat': null }]
+          }
+        ]
+      }
+    );
   } catch (err) {
     console.error('Error cleaning expired locks:', err);
   }
 }
 
-// Get all documents in a workspace
-router.get('/workspace/:workspaceId', requireWorkspaceMember(), (req, res) => {
+// Get all documents in workspace
+router.get('/workspace/:workspaceId', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId } = req.params;
-    const stmt = db.prepare(`
-      SELECT 
-        d.id, 
-        d.workspace_id, 
-        d.project_id, 
-        d.title, 
-        d.template_type, 
-        d.version, 
-        d.created_by, 
-        d.created_at, 
-        d.updated_at,
-        u.name as creator_name,
-        p.name as project_name,
-        (SELECT COUNT(*) FROM document_sections WHERE document_id = d.id) as section_count
-      FROM documents d
-      JOIN users u ON u.id = d.created_by
-      LEFT JOIN projects p ON p.id = d.project_id
-      WHERE d.workspace_id = ?
-      ORDER BY d.updated_at DESC
-    `);
-    const documents = stmt.all(workspaceId);
-    res.json({ documents });
+    const documents = await Document.find({ workspaceId })
+      .populate('createdBy', 'name')
+      .populate('projectId', 'name')
+      .sort({ updatedAt: -1 });
+
+    const formatted = documents.map((d) => ({
+      id: d._id.toString(),
+      workspace_id: d.workspaceId.toString(),
+      project_id: d.projectId ? d.projectId._id.toString() : null,
+      project_name: d.projectId ? d.projectId.name : null,
+      title: d.title,
+      template_type: d.templateType,
+      version: d.version,
+      created_by: d.createdBy ? d.createdBy._id.toString() : null,
+      creator_name: d.createdBy ? d.createdBy.name : 'Author',
+      section_count: d.sections.length,
+      created_at: d.createdAt.toISOString(),
+      updated_at: d.updatedAt.toISOString()
+    }));
+
+    res.json({ documents: formatted });
   } catch (err) {
     console.error('Fetch documents error:', err);
     res.status(500).json({ error: 'Failed to fetch documents.' });
   }
 });
 
-// Create a new document (from template or custom)
-router.post('/', requireWorkspaceMember(), (req, res) => {
+// Create a new document
+router.post('/', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId, projectId, title, templateType = 'custom', customSections } = req.body;
-
-    if (!workspaceId) {
-      return res.status(400).json({ error: 'Workspace ID is required.' });
-    }
-
     const docTitle = (title && title.trim()) || 'Untitled Document';
-    const docId = crypto.randomUUID();
-    const now = new Date().toISOString();
 
-    const insertDoc = db.prepare(`
-      INSERT INTO documents (id, workspace_id, project_id, title, template_type, version, created_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
-    `);
-    insertDoc.run(docId, workspaceId, projectId || null, docTitle, templateType, req.user.id, now, now);
-
-    // Determine sections to insert
     const template = DOCUMENT_TEMPLATES[templateType] || DOCUMENT_TEMPLATES['custom'];
     const sectionsToInsert = Array.isArray(customSections) && customSections.length > 0
-      ? customSections
-      : template.sections;
+      ? customSections.map((s, idx) => ({
+          sectionKey: s.key || `sec-${idx}`,
+          title: s.title || `Section ${idx + 1}`,
+          content: s.content || '',
+          orderIndex: idx,
+          version: 1
+        }))
+      : template.sections.map((s, idx) => ({
+          sectionKey: s.key,
+          title: s.title,
+          content: s.content,
+          orderIndex: idx,
+          version: 1
+        }));
 
-    const insertSection = db.prepare(`
-      INSERT INTO document_sections (id, document_id, section_key, title, content, order_index, assigned_to, assigned_name, version, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `);
-
-    sectionsToInsert.forEach((sec, idx) => {
-      insertSection.run(
-        crypto.randomUUID(),
-        docId,
-        sec.key || `sec-${idx}`,
-        sec.title || `Section ${idx + 1}`,
-        sec.content || '',
-        idx,
-        null,
-        null,
-        now
-      );
+    const doc = await Document.create({
+      workspaceId,
+      projectId: projectId || null,
+      title: docTitle,
+      templateType,
+      version: 1,
+      createdBy: req.user.id,
+      sections: sectionsToInsert
     });
 
     // Create initial version snapshot
-    const initialSections = db.prepare('SELECT * FROM document_sections WHERE document_id = ? ORDER BY order_index ASC').all(docId);
-    db.prepare(`
-      INSERT INTO document_versions (id, document_id, version_number, title, sections_snapshot, created_by, created_by_name, summary, created_at)
-      VALUES (?, ?, 1, ?, ?, ?, ?, 'Initial template creation', ?)
-    `).run(crypto.randomUUID(), docId, docTitle, JSON.stringify(initialSections), req.user.id, req.user.name, now);
+    await DocumentVersion.create({
+      documentId: doc._id,
+      versionNumber: 1,
+      title: docTitle,
+      sectionsSnapshot: doc.sections,
+      createdBy: req.user.id,
+      createdByName: req.user.name,
+      summary: 'Initial template creation'
+    });
 
-    logActivity({
+    await logActivity({
       workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'document_created',
       entityType: 'document',
-      entityId: docId,
+      entityId: doc._id,
       entityTitle: docTitle,
       details: `Created document using template "${template.name || templateType}"`
     });
 
     res.status(201).json({
       document: {
-        id: docId,
-        workspace_id: workspaceId,
-        project_id: projectId || null,
-        title: docTitle,
-        template_type: templateType,
-        version: 1,
-        created_by: req.user.id,
-        created_at: now,
-        updated_at: now
+        id: doc._id.toString(),
+        workspace_id: doc.workspaceId.toString(),
+        project_id: doc.projectId ? doc.projectId.toString() : null,
+        title: doc.title,
+        template_type: doc.templateType,
+        version: doc.version,
+        created_by: doc.createdBy.toString(),
+        created_at: doc.createdAt.toISOString(),
+        updated_at: doc.updatedAt.toISOString()
       }
     });
   } catch (err) {
@@ -136,46 +144,60 @@ router.post('/', requireWorkspaceMember(), (req, res) => {
   }
 });
 
-// Get a single document with all its sections and clean lock statuses
-router.get('/:id', requireDocumentAccess, (req, res) => {
+// Get a single document with all sections
+router.get('/:id', requireDocumentAccess, async (req, res) => {
   try {
     const { id } = req.params;
-    cleanExpiredLocks(id);
+    await cleanExpiredLocks(id);
 
-    const docStmt = db.prepare(`
-      SELECT d.*, u.name as creator_name, p.name as project_name
-      FROM documents d
-      JOIN users u ON u.id = d.created_by
-      LEFT JOIN projects p ON p.id = d.project_id
-      WHERE d.id = ?
-    `);
-    const doc = docStmt.get(id);
+    const doc = await Document.findById(id)
+      .populate('createdBy', 'name')
+      .populate('projectId', 'name');
 
-    const sectionsStmt = db.prepare(`
-      SELECT s.*, 
-             u_assign.name as assigned_user_name, u_assign.avatar_color as assigned_avatar_color,
-             u_lock.name as locked_user_name, u_lock.avatar_color as locked_avatar_color
-      FROM document_sections s
-      LEFT JOIN users u_assign ON u_assign.id = s.assigned_to
-      LEFT JOIN users u_lock ON u_lock.id = s.locked_by
-      WHERE s.document_id = ?
-      ORDER BY s.order_index ASC
-    `);
-    const sections = sectionsStmt.all(id);
+    // Get workspace members
+    const workspace = await Workspace.findById(doc.workspaceId).populate('members.userId', 'name email avatarColor');
+    const workspaceMembers = workspace.members.map((m) => ({
+      id: m.userId?._id?.toString() || m.userId?.toString(),
+      name: m.userId?.name || 'User',
+      email: m.userId?.email || '',
+      avatar_color: m.userId?.avatarColor || '#111111',
+      role: m.role
+    }));
 
-    // Get workspace members for section assignment dropdown
-    const membersStmt = db.prepare(`
-      SELECT u.id, u.name, u.email, u.avatar_color, wm.role
-      FROM workspace_members wm
-      JOIN users u ON u.id = wm.user_id
-      WHERE wm.workspace_id = ?
-      ORDER BY u.name ASC
-    `);
-    const workspaceMembers = membersStmt.all(doc.workspace_id);
+    // Format sections
+    const formattedSections = doc.sections
+      .sort((a, b) => a.orderIndex - b.orderIndex)
+      .map((s) => ({
+        id: s._id.toString(),
+        document_id: doc._id.toString(),
+        section_key: s.sectionKey,
+        title: s.title,
+        content: s.content,
+        order_index: s.orderIndex,
+        assigned_to: s.assignedTo ? s.assignedTo.toString() : null,
+        assigned_name: s.assignedName,
+        locked_by: s.lockedBy ? s.lockedBy.toString() : null,
+        locked_by_name: s.lockedByName,
+        locked_at: s.lockedAt ? s.lockedAt.toISOString() : null,
+        version: s.version,
+        updated_at: s.updatedAt ? s.updatedAt.toISOString() : doc.updatedAt.toISOString()
+      }));
 
     res.json({
-      document: doc,
-      sections,
+      document: {
+        id: doc._id.toString(),
+        workspace_id: doc.workspaceId.toString(),
+        project_id: doc.projectId ? doc.projectId._id.toString() : null,
+        project_name: doc.projectId ? doc.projectId.name : null,
+        title: doc.title,
+        template_type: doc.templateType,
+        version: doc.version,
+        created_by: doc.createdBy ? doc.createdBy._id.toString() : null,
+        creator_name: doc.createdBy ? doc.createdBy.name : 'Author',
+        created_at: doc.createdAt.toISOString(),
+        updated_at: doc.updatedAt.toISOString()
+      },
+      sections: formattedSections,
       workspaceMembers,
       currentUserRole: req.workspaceMember.role
     });
@@ -185,30 +207,25 @@ router.get('/:id', requireDocumentAccess, (req, res) => {
   }
 });
 
-// Update document metadata (title, project_id)
-router.put('/:id', requireDocumentAccess, (req, res) => {
+// Update document metadata (title, projectId)
+router.put('/:id', requireDocumentAccess, async (req, res) => {
   try {
     const { id } = req.params;
     const { title, projectId } = req.body;
-    const now = new Date().toISOString();
 
-    const updateStmt = db.prepare(`
-      UPDATE documents
-      SET title = COALESCE(?, title),
-          project_id = ?,
-          updated_at = ?
-      WHERE id = ?
-    `);
-    updateStmt.run(title ? title.trim() : null, projectId !== undefined ? projectId : null, now, id);
+    const doc = req.document;
+    if (title) doc.title = title.trim();
+    if (projectId !== undefined) doc.projectId = projectId || null;
+    await doc.save();
 
-    logActivity({
-      workspaceId: req.document.workspace_id,
+    await logActivity({
+      workspaceId: doc.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'document_updated',
       entityType: 'document',
       entityId: id,
-      entityTitle: title ? title.trim() : req.document.title,
+      entityTitle: doc.title,
       details: 'Updated document settings'
     });
 
@@ -220,7 +237,7 @@ router.put('/:id', requireDocumentAccess, (req, res) => {
 });
 
 // Delete document
-router.delete('/:id', requireDocumentAccess, (req, res) => {
+router.delete('/:id', requireDocumentAccess, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -228,10 +245,11 @@ router.delete('/:id', requireDocumentAccess, (req, res) => {
       return res.status(403).json({ error: 'Viewers cannot delete documents.' });
     }
 
-    db.prepare('DELETE FROM documents WHERE id = ?').run(id);
+    await Document.findByIdAndDelete(id);
+    await DocumentVersion.deleteMany({ documentId: id });
 
-    logActivity({
-      workspaceId: req.document.workspace_id,
+    await logActivity({
+      workspaceId: req.document.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'document_deleted',
@@ -248,47 +266,63 @@ router.delete('/:id', requireDocumentAccess, (req, res) => {
   }
 });
 
-// Add a new section to document
-router.post('/:id/sections', requireDocumentAccess, (req, res) => {
+// Add section
+router.post('/:id/sections', requireDocumentAccess, async (req, res) => {
   try {
     const { id } = req.params;
     const { title = 'New Section', content = '', assignedTo = null } = req.body;
 
-    const countStmt = db.prepare('SELECT COUNT(*) as count FROM document_sections WHERE document_id = ?');
-    const { count } = countStmt.get(id);
-
-    const sectionId = crypto.randomUUID();
-    const sectionKey = `section-${Date.now()}`;
-    const now = new Date().toISOString();
-
+    const doc = req.document;
     let assignedName = null;
     if (assignedTo) {
-      const u = db.prepare('SELECT name FROM users WHERE id = ?').get(assignedTo);
+      const u = await User.findById(assignedTo);
       assignedName = u ? u.name : null;
     }
 
-    const insertStmt = db.prepare(`
-      INSERT INTO document_sections (id, document_id, section_key, title, content, order_index, assigned_to, assigned_name, version, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `);
-    insertStmt.run(sectionId, id, sectionKey, title.trim(), content, count, assignedTo, assignedName, now);
+    const newSection = {
+      sectionKey: `section-${Date.now()}`,
+      title: title.trim(),
+      content,
+      orderIndex: doc.sections.length,
+      assignedTo: assignedTo || null,
+      assignedName,
+      version: 1,
+      updatedAt: new Date()
+    };
 
-    // Update document updated_at
-    db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(now, id);
+    doc.sections.push(newSection);
+    await doc.save();
 
-    logActivity({
-      workspaceId: req.document.workspace_id,
+    const added = doc.sections[doc.sections.length - 1];
+
+    await logActivity({
+      workspaceId: doc.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'section_created',
       entityType: 'section',
-      entityId: sectionId,
-      entityTitle: title.trim(),
-      details: `Added new section to "${req.document.title}"`
+      entityId: added._id,
+      entityTitle: added.title,
+      details: `Added new section to "${doc.title}"`
     });
 
-    const newSection = db.prepare('SELECT * FROM document_sections WHERE id = ?').get(sectionId);
-    res.status(201).json({ section: newSection });
+    res.status(201).json({
+      section: {
+        id: added._id.toString(),
+        document_id: doc._id.toString(),
+        section_key: added.sectionKey,
+        title: added.title,
+        content: added.content,
+        order_index: added.orderIndex,
+        assigned_to: added.assignedTo ? added.assignedTo.toString() : null,
+        assigned_name: added.assignedName,
+        locked_by: null,
+        locked_by_name: null,
+        locked_at: null,
+        version: added.version,
+        updated_at: added.updatedAt.toISOString()
+      }
+    });
   } catch (err) {
     console.error('Add section error:', err);
     res.status(500).json({ error: 'Failed to add section.' });
@@ -296,56 +330,60 @@ router.post('/:id/sections', requireDocumentAccess, (req, res) => {
 });
 
 // Update a section (with optimistic version checking and lock validation)
-router.put('/:id/sections/:sectionId', requireDocumentAccess, (req, res) => {
+router.put('/:id/sections/:sectionId', requireDocumentAccess, async (req, res) => {
   try {
     const { id, sectionId } = req.params;
     const { title, content, expectedVersion, force = false } = req.body;
-    cleanExpiredLocks(id);
+    await cleanExpiredLocks(id);
 
-    const currentSection = db.prepare('SELECT * FROM document_sections WHERE id = ? AND document_id = ?').get(sectionId, id);
-    if (!currentSection) {
+    const doc = await Document.findById(id);
+    const section = doc.sections.id(sectionId);
+
+    if (!section) {
       return res.status(404).json({ error: 'Section not found.' });
     }
 
-    // Lock validation: if locked by someone else, check lock
-    if (currentSection.locked_by && currentSection.locked_by !== req.user.id) {
+    // Lock validation: if locked by another user
+    if (section.lockedBy && section.lockedBy.toString() !== req.user.id) {
       return res.status(423).json({
-        error: `This section is currently being edited by ${currentSection.locked_by_name || 'another collaborator'}.`,
-        lockedBy: currentSection.locked_by,
-        lockedByName: currentSection.locked_by_name
+        error: `This section is currently being edited by ${section.lockedByName || 'another collaborator'}.`,
+        lockedBy: section.lockedBy.toString(),
+        lockedByName: section.lockedByName
       });
     }
 
-    // Optimistic version check to prevent overwrite collisions
-    if (!force && expectedVersion !== undefined && currentSection.version !== expectedVersion) {
+    // Optimistic version check
+    if (!force && expectedVersion !== undefined && section.version !== expectedVersion) {
       return res.status(409).json({
         error: 'Section was modified by another collaborator. Please refresh or merge changes.',
-        serverVersion: currentSection.version,
-        serverContent: currentSection.content,
-        serverTitle: currentSection.title
+        serverVersion: section.version,
+        serverContent: section.content,
+        serverTitle: section.title
       });
     }
 
-    const nextVersion = currentSection.version + 1;
-    const now = new Date().toISOString();
+    if (title !== undefined) section.title = title;
+    if (content !== undefined) section.content = content;
+    section.version = (section.version || 0) + 1;
+    section.updatedAt = new Date();
 
-    const updateStmt = db.prepare(`
-      UPDATE document_sections
-      SET title = COALESCE(?, title),
-          content = COALESCE(?, content),
-          version = ?,
-          updated_at = ?
-      WHERE id = ?
-    `);
-    updateStmt.run(title !== undefined ? title : null, content !== undefined ? content : null, nextVersion, now, sectionId);
-
-    // Update document timestamp
-    db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(now, id);
-
-    const updated = db.prepare('SELECT * FROM document_sections WHERE id = ?').get(sectionId);
+    await doc.save();
 
     res.json({
-      section: updated,
+      section: {
+        id: section._id.toString(),
+        document_id: doc._id.toString(),
+        section_key: section.sectionKey,
+        title: section.title,
+        content: section.content,
+        order_index: section.orderIndex,
+        assigned_to: section.assignedTo ? section.assignedTo.toString() : null,
+        assigned_name: section.assignedName,
+        locked_by: section.lockedBy ? section.lockedBy.toString() : null,
+        locked_by_name: section.lockedByName,
+        version: section.version,
+        updated_at: section.updatedAt.toISOString()
+      },
       message: 'Section saved successfully.'
     });
   } catch (err) {
@@ -355,34 +393,35 @@ router.put('/:id/sections/:sectionId', requireDocumentAccess, (req, res) => {
 });
 
 // Delete a section
-router.delete('/:id/sections/:sectionId', requireDocumentAccess, (req, res) => {
+router.delete('/:id/sections/:sectionId', requireDocumentAccess, async (req, res) => {
   try {
     const { id, sectionId } = req.params;
+    const doc = req.document;
 
-    const current = db.prepare('SELECT title FROM document_sections WHERE id = ? AND document_id = ?').get(sectionId, id);
-    if (!current) {
+    const section = doc.sections.id(sectionId);
+    if (!section) {
       return res.status(404).json({ error: 'Section not found.' });
     }
 
-    db.prepare('DELETE FROM document_sections WHERE id = ?').run(sectionId);
+    const title = section.title;
+    doc.sections.pull(sectionId);
 
-    // Reorder remaining sections
-    const remaining = db.prepare('SELECT id FROM document_sections WHERE document_id = ? ORDER BY order_index ASC').all(id);
-    const updateOrder = db.prepare('UPDATE document_sections SET order_index = ? WHERE id = ?');
-    remaining.forEach((s, idx) => updateOrder.run(idx, s.id));
+    // Reindex remaining sections
+    doc.sections.forEach((s, idx) => {
+      s.orderIndex = idx;
+    });
 
-    const now = new Date().toISOString();
-    db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(now, id);
+    await doc.save();
 
-    logActivity({
-      workspaceId: req.document.workspace_id,
+    await logActivity({
+      workspaceId: doc.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'section_deleted',
       entityType: 'section',
       entityId: sectionId,
-      entityTitle: current.title,
-      details: `Removed section from "${req.document.title}"`
+      entityTitle: title,
+      details: `Removed section from "${doc.title}"`
     });
 
     res.json({ message: 'Section removed.' });
@@ -393,22 +432,29 @@ router.delete('/:id/sections/:sectionId', requireDocumentAccess, (req, res) => {
 });
 
 // Reorder sections
-router.put('/:id/reorder-sections', requireDocumentAccess, (req, res) => {
+router.put('/:id/reorder-sections', requireDocumentAccess, async (req, res) => {
   try {
     const { id } = req.params;
-    const { sectionIds } = req.body; // Array of section IDs in new order
+    const { sectionIds } = req.body;
 
     if (!Array.isArray(sectionIds)) {
       return res.status(400).json({ error: 'sectionIds array is required.' });
     }
 
-    const updateOrder = db.prepare('UPDATE document_sections SET order_index = ? WHERE id = ? AND document_id = ?');
+    const doc = req.document;
+    const sectionMap = new Map(doc.sections.map((s) => [s._id.toString(), s]));
+
+    const reordered = [];
     sectionIds.forEach((secId, idx) => {
-      updateOrder.run(idx, secId, id);
+      const s = sectionMap.get(secId);
+      if (s) {
+        s.orderIndex = idx;
+        reordered.push(s);
+      }
     });
 
-    const now = new Date().toISOString();
-    db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(now, id);
+    doc.sections = reordered;
+    await doc.save();
 
     res.json({ message: 'Sections reordered successfully.' });
   } catch (err) {
@@ -417,32 +463,33 @@ router.put('/:id/reorder-sections', requireDocumentAccess, (req, res) => {
   }
 });
 
-// Assign / Reassign section to collaborator
-router.post('/:id/sections/:sectionId/assign', requireDocumentAccess, (req, res) => {
+// Assign section
+router.post('/:id/sections/:sectionId/assign', requireDocumentAccess, async (req, res) => {
   try {
     const { id, sectionId } = req.params;
-    const { assignedTo } = req.body; // User ID or null to unassign
+    const { assignedTo } = req.body;
 
     let assignedName = null;
     if (assignedTo) {
-      const user = db.prepare('SELECT name FROM users WHERE id = ?').get(assignedTo);
+      const user = await User.findById(assignedTo);
       if (!user) {
         return res.status(404).json({ error: 'Assigned user does not exist.' });
       }
       assignedName = user.name;
     }
 
-    const updateStmt = db.prepare(`
-      UPDATE document_sections
-      SET assigned_to = ?, assigned_name = ?
-      WHERE id = ? AND document_id = ?
-    `);
-    updateStmt.run(assignedTo || null, assignedName, sectionId, id);
+    const doc = req.document;
+    const section = doc.sections.id(sectionId);
+    if (!section) {
+      return res.status(404).json({ error: 'Section not found.' });
+    }
 
-    const section = db.prepare('SELECT * FROM document_sections WHERE id = ?').get(sectionId);
+    section.assignedTo = assignedTo || null;
+    section.assignedName = assignedName;
+    await doc.save();
 
-    logActivity({
-      workspaceId: req.document.workspace_id,
+    await logActivity({
+      workspaceId: doc.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'section_assigned',
@@ -452,7 +499,14 @@ router.post('/:id/sections/:sectionId/assign', requireDocumentAccess, (req, res)
       details: assignedTo ? `Assigned section to ${assignedName}` : 'Unassigned section'
     });
 
-    res.json({ section, message: 'Assignment updated.' });
+    res.json({
+      section: {
+        id: section._id.toString(),
+        assigned_to: section.assignedTo ? section.assignedTo.toString() : null,
+        assigned_name: section.assignedName
+      },
+      message: 'Assignment updated.'
+    });
   } catch (err) {
     console.error('Assign section error:', err);
     res.status(500).json({ error: 'Failed to assign section.' });
@@ -460,39 +514,39 @@ router.post('/:id/sections/:sectionId/assign', requireDocumentAccess, (req, res)
 });
 
 // Lock section for editing
-router.post('/:id/sections/:sectionId/lock', requireDocumentAccess, (req, res) => {
+router.post('/:id/sections/:sectionId/lock', requireDocumentAccess, async (req, res) => {
   try {
     const { id, sectionId } = req.params;
-    cleanExpiredLocks(id);
+    await cleanExpiredLocks(id);
 
-    const section = db.prepare('SELECT * FROM document_sections WHERE id = ? AND document_id = ?').get(sectionId, id);
+    const doc = await Document.findById(id);
+    const section = doc.sections.id(sectionId);
+
     if (!section) {
       return res.status(404).json({ error: 'Section not found.' });
     }
 
-    // If locked by someone else and not expired
-    if (section.locked_by && section.locked_by !== req.user.id) {
+    if (section.lockedBy && section.lockedBy.toString() !== req.user.id) {
       return res.status(423).json({
-        error: `Section is currently locked by ${section.locked_by_name || 'another collaborator'}.`,
-        lockedBy: section.locked_by,
-        lockedByName: section.locked_by_name
+        error: `Section is currently locked by ${section.lockedByName || 'another collaborator'}.`,
+        lockedBy: section.lockedBy.toString(),
+        lockedByName: section.lockedByName
       });
     }
 
-    const now = new Date().toISOString();
-    const updateStmt = db.prepare(`
-      UPDATE document_sections
-      SET locked_by = ?, locked_by_name = ?, locked_at = ?, lock_heartbeat = ?
-      WHERE id = ?
-    `);
-    updateStmt.run(req.user.id, req.user.name, now, now, sectionId);
+    const now = new Date();
+    section.lockedBy = req.user.id;
+    section.lockedByName = req.user.name;
+    section.lockedAt = now;
+    section.lockHeartbeat = now;
+    await doc.save();
 
     res.json({
       message: 'Lock acquired.',
       sectionId,
       lockedBy: req.user.id,
       lockedByName: req.user.name,
-      lockedAt: now
+      lockedAt: now.toISOString()
     });
   } catch (err) {
     console.error('Acquire lock error:', err);
@@ -500,34 +554,20 @@ router.post('/:id/sections/:sectionId/lock', requireDocumentAccess, (req, res) =
   }
 });
 
-// Heartbeat lock to keep active
-router.post('/:id/sections/:sectionId/heartbeat', requireDocumentAccess, (req, res) => {
-  try {
-    const { id, sectionId } = req.params;
-    const now = new Date().toISOString();
-    const updateStmt = db.prepare(`
-      UPDATE document_sections
-      SET lock_heartbeat = ?
-      WHERE id = ? AND document_id = ? AND locked_by = ?
-    `);
-    updateStmt.run(now, sectionId, id, req.user.id);
-    res.json({ success: true, timestamp: now });
-  } catch (err) {
-    res.status(500).json({ error: 'Heartbeat failed.' });
-  }
-});
-
 // Release section lock
-router.post('/:id/sections/:sectionId/unlock', requireDocumentAccess, (req, res) => {
+router.post('/:id/sections/:sectionId/unlock', requireDocumentAccess, async (req, res) => {
   try {
     const { id, sectionId } = req.params;
+    const doc = req.document;
+    const section = doc.sections.id(sectionId);
 
-    const updateStmt = db.prepare(`
-      UPDATE document_sections
-      SET locked_by = NULL, locked_by_name = NULL, locked_at = NULL, lock_heartbeat = NULL
-      WHERE id = ? AND document_id = ? AND (locked_by = ? OR ? IN ('owner', 'admin'))
-    `);
-    updateStmt.run(sectionId, id, req.user.id, req.workspaceMember.role);
+    if (section && (section.lockedBy?.toString() === req.user.id || ['owner', 'admin'].includes(req.workspaceMember.role))) {
+      section.lockedBy = null;
+      section.lockedByName = null;
+      section.lockedAt = null;
+      section.lockHeartbeat = null;
+      await doc.save();
+    }
 
     res.json({ message: 'Lock released.', sectionId });
   } catch (err) {
@@ -536,59 +576,67 @@ router.post('/:id/sections/:sectionId/unlock', requireDocumentAccess, (req, res)
   }
 });
 
-// Get document version history
-router.get('/:id/versions', requireDocumentAccess, (req, res) => {
+// Version history list
+router.get('/:id/versions', requireDocumentAccess, async (req, res) => {
   try {
     const { id } = req.params;
-    const stmt = db.prepare(`
-      SELECT id, document_id, version_number, title, created_by, created_by_name, summary, created_at
-      FROM document_versions
-      WHERE document_id = ?
-      ORDER BY version_number DESC
-    `);
-    const versions = stmt.all(id);
-    res.json({ versions });
+    const versions = await DocumentVersion.find({ documentId: id }).sort({ versionNumber: -1 });
+
+    const formatted = versions.map((v) => ({
+      id: v._id.toString(),
+      document_id: v.documentId.toString(),
+      version_number: v.versionNumber,
+      title: v.title,
+      created_by: v.createdBy.toString(),
+      created_by_name: v.createdByName,
+      summary: v.summary,
+      created_at: v.createdAt.toISOString()
+    }));
+
+    res.json({ versions: formatted });
   } catch (err) {
     console.error('Fetch versions error:', err);
     res.status(500).json({ error: 'Failed to fetch version history.' });
   }
 });
 
-// Create a snapshot version
-router.post('/:id/versions', requireDocumentAccess, (req, res) => {
+// Create manual snapshot version
+router.post('/:id/versions', requireDocumentAccess, async (req, res) => {
   try {
     const { id } = req.params;
     const { summary = 'Manual snapshot' } = req.body;
+    const doc = req.document;
 
-    const sections = db.prepare('SELECT * FROM document_sections WHERE document_id = ? ORDER BY order_index ASC').all(id);
-    const latestVersion = db.prepare('SELECT MAX(version_number) as max_v FROM document_versions WHERE document_id = ?').get(id);
-    const nextVersionNum = (latestVersion?.max_v || 0) + 1;
-    const now = new Date().toISOString();
+    const latest = await DocumentVersion.findOne({ documentId: id }).sort({ versionNumber: -1 });
+    const nextVersionNum = (latest?.versionNumber || 0) + 1;
 
-    const insertVersion = db.prepare(`
-      INSERT INTO document_versions (id, document_id, version_number, title, sections_snapshot, created_by, created_by_name, summary, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const versionId = crypto.randomUUID();
-    insertVersion.run(versionId, id, nextVersionNum, req.document.title, JSON.stringify(sections), req.user.id, req.user.name, summary.trim(), now);
+    const version = await DocumentVersion.create({
+      documentId: id,
+      versionNumber: nextVersionNum,
+      title: doc.title,
+      sectionsSnapshot: doc.sections,
+      createdBy: req.user.id,
+      createdByName: req.user.name,
+      summary: summary.trim()
+    });
 
-    logActivity({
-      workspaceId: req.document.workspace_id,
+    await logActivity({
+      workspaceId: doc.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'version_created',
       entityType: 'document',
       entityId: id,
-      entityTitle: req.document.title,
+      entityTitle: doc.title,
       details: `Created version ${nextVersionNum}: ${summary}`
     });
 
     res.status(201).json({
       message: 'Version snapshot created.',
       version: {
-        id: versionId,
+        id: version._id.toString(),
         version_number: nextVersionNum,
-        created_at: now,
+        created_at: version.createdAt.toISOString(),
         created_by_name: req.user.name,
         summary
       }
@@ -599,8 +647,8 @@ router.post('/:id/versions', requireDocumentAccess, (req, res) => {
   }
 });
 
-// Restore a previous version
-router.post('/:id/versions/:versionId/restore', requireDocumentAccess, (req, res) => {
+// Restore previous version
+router.post('/:id/versions/:versionId/restore', requireDocumentAccess, async (req, res) => {
   try {
     const { id, versionId } = req.params;
 
@@ -608,80 +656,70 @@ router.post('/:id/versions/:versionId/restore', requireDocumentAccess, (req, res
       return res.status(403).json({ error: 'Viewers cannot restore versions.' });
     }
 
-    const version = db.prepare('SELECT * FROM document_versions WHERE id = ? AND document_id = ?').get(versionId, id);
-    if (!version) {
+    const versionToRestore = await DocumentVersion.findOne({ _id: versionId, documentId: id });
+    if (!versionToRestore) {
       return res.status(404).json({ error: 'Version record not found.' });
     }
 
-    let snapshotSections = [];
-    try {
-      snapshotSections = JSON.parse(version.sections_snapshot);
-    } catch (parseErr) {
-      return res.status(500).json({ error: 'Corrupt snapshot data.' });
-    }
+    const doc = req.document;
 
-    // Save a backup of current before restoring
-    const currentSections = db.prepare('SELECT * FROM document_sections WHERE document_id = ? ORDER BY order_index ASC').all(id);
-    const latestVersion = db.prepare('SELECT MAX(version_number) as max_v FROM document_versions WHERE document_id = ?').get(id);
-    const backupVersionNum = (latestVersion?.max_v || 0) + 1;
-    const now = new Date().toISOString();
+    // Save auto-backup of current state
+    const latest = await DocumentVersion.findOne({ documentId: id }).sort({ versionNumber: -1 });
+    const backupVersionNum = (latest?.versionNumber || 0) + 1;
 
-    db.prepare(`
-      INSERT INTO document_versions (id, document_id, version_number, title, sections_snapshot, created_by, created_by_name, summary, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      crypto.randomUUID(),
-      id,
-      backupVersionNum,
-      req.document.title,
-      JSON.stringify(currentSections),
-      req.user.id,
-      req.user.name,
-      `Auto-backup before restoring Version ${version.version_number}`,
-      now
-    );
-
-    // Delete current sections
-    db.prepare('DELETE FROM document_sections WHERE document_id = ?').run(id);
-
-    // Reinsert snapshot sections
-    const insertSection = db.prepare(`
-      INSERT INTO document_sections (id, document_id, section_key, title, content, order_index, assigned_to, assigned_name, version, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `);
-
-    snapshotSections.forEach((s, idx) => {
-      insertSection.run(
-        crypto.randomUUID(),
-        id,
-        s.section_key || `sec-${idx}`,
-        s.title,
-        s.content,
-        idx,
-        s.assigned_to || null,
-        s.assigned_name || null,
-        now
-      );
+    await DocumentVersion.create({
+      documentId: id,
+      versionNumber: backupVersionNum,
+      title: doc.title,
+      sectionsSnapshot: doc.sections,
+      createdBy: req.user.id,
+      createdByName: req.user.name,
+      summary: `Auto-backup before restoring Version ${versionToRestore.versionNumber}`
     });
 
-    db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(now, id);
+    // Replace current sections with snapshot sections
+    doc.sections = versionToRestore.sectionsSnapshot.map((s, idx) => ({
+      sectionKey: s.sectionKey || s.section_key || `sec-${idx}`,
+      title: s.title,
+      content: s.content,
+      orderIndex: idx,
+      assignedTo: s.assignedTo || null,
+      assignedName: s.assignedName || null,
+      version: 1,
+      updatedAt: new Date()
+    }));
 
-    logActivity({
-      workspaceId: req.document.workspace_id,
+    await doc.save();
+
+    await logActivity({
+      workspaceId: doc.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'version_restored',
       entityType: 'document',
       entityId: id,
-      entityTitle: req.document.title,
-      details: `Restored to version ${version.version_number}`
+      entityTitle: doc.title,
+      details: `Restored to version ${versionToRestore.versionNumber}`
     });
 
-    const restoredSections = db.prepare('SELECT * FROM document_sections WHERE document_id = ? ORDER BY order_index ASC').all(id);
+    const formattedSections = doc.sections.map((s) => ({
+      id: s._id.toString(),
+      document_id: doc._id.toString(),
+      section_key: s.sectionKey,
+      title: s.title,
+      content: s.content,
+      order_index: s.orderIndex,
+      assigned_to: s.assignedTo ? s.assignedTo.toString() : null,
+      assigned_name: s.assignedName,
+      locked_by: null,
+      locked_by_name: null,
+      version: s.version,
+      updated_at: s.updatedAt.toISOString()
+    }));
 
     res.json({
-      message: `Successfully restored to Version ${version.version_number}.`,
-      sections: restoredSections
+      message: `Successfully restored to Version ${versionToRestore.versionNumber}.`,
+      sections: formattedSections
     });
   } catch (err) {
     console.error('Restore version error:', err);

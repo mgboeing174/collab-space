@@ -1,36 +1,45 @@
 import express from 'express';
 import crypto from 'crypto';
-import db, { logActivity } from '../db/database.js';
+import Workspace from '../models/Workspace.js';
+import Project from '../models/Project.js';
+import Document from '../models/Document.js';
+import Whiteboard from '../models/Whiteboard.js';
+import User from '../models/User.js';
+import { logActivity } from '../db/database.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireWorkspaceMember } from '../middleware/permissions.js';
 
 const router = express.Router();
 router.use(authenticateToken);
 
-// Get all workspaces the current user belongs to
-router.get('/', (req, res) => {
+// Get all workspaces user belongs to
+router.get('/', async (req, res) => {
   try {
-    const stmt = db.prepare(`
-      SELECT 
-        w.id, 
-        w.name, 
-        w.description, 
-        w.invite_code, 
-        w.owner_id, 
-        w.created_at, 
-        w.updated_at,
-        wm.role as my_role,
-        wm.joined_at,
-        (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = w.id) as member_count,
-        (SELECT COUNT(*) FROM documents WHERE workspace_id = w.id) as doc_count,
-        (SELECT COUNT(*) FROM whiteboards WHERE workspace_id = w.id) as whiteboard_count
-      FROM workspaces w
-      JOIN workspace_members wm ON wm.workspace_id = w.id
-      WHERE wm.user_id = ?
-      ORDER BY w.updated_at DESC
-    `);
-    const workspaces = stmt.all(req.user.id);
-    res.json({ workspaces });
+    const workspaces = await Workspace.find({ 'members.userId': req.user.id }).sort({ updatedAt: -1 });
+
+    const formatted = await Promise.all(
+      workspaces.map(async (w) => {
+        const myMember = w.members.find((m) => m.userId.toString() === req.user.id);
+        const docCount = await Document.countDocuments({ workspaceId: w._id });
+        const whiteboardCount = await Whiteboard.countDocuments({ workspaceId: w._id });
+
+        return {
+          id: w._id.toString(),
+          name: w.name,
+          description: w.description,
+          invite_code: w.inviteCode,
+          owner_id: w.ownerId.toString(),
+          created_at: w.createdAt.toISOString(),
+          updated_at: w.updatedAt.toISOString(),
+          my_role: myMember ? myMember.role : 'member',
+          member_count: w.members.length,
+          doc_count: docCount,
+          whiteboard_count: whiteboardCount
+        };
+      })
+    );
+
+    res.json({ workspaces: formatted });
   } catch (err) {
     console.error('Fetch workspaces error:', err);
     res.status(500).json({ error: 'Failed to fetch workspaces.' });
@@ -38,50 +47,49 @@ router.get('/', (req, res) => {
 });
 
 // Create a new workspace
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const { name, description } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Workspace name is required.' });
     }
 
-    const workspaceId = crypto.randomUUID();
     const inviteCode = crypto.randomBytes(6).toString('hex');
-    const now = new Date().toISOString();
+    const workspace = await Workspace.create({
+      name: name.trim(),
+      description: (description || '').trim(),
+      inviteCode,
+      ownerId: req.user.id,
+      members: [
+        {
+          userId: req.user.id,
+          role: 'owner',
+          joinedAt: new Date()
+        }
+      ]
+    });
 
-    const insertWs = db.prepare(`
-      INSERT INTO workspaces (id, name, description, invite_code, owner_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertWs.run(workspaceId, name.trim(), (description || '').trim(), inviteCode, req.user.id, now, now);
-
-    const insertMember = db.prepare(`
-      INSERT INTO workspace_members (id, workspace_id, user_id, role, joined_at)
-      VALUES (?, ?, ?, 'owner', ?)
-    `);
-    insertMember.run(crypto.randomUUID(), workspaceId, req.user.id, now);
-
-    logActivity({
-      workspaceId,
+    await logActivity({
+      workspaceId: workspace._id,
       userId: req.user.id,
       userName: req.user.name,
       action: 'workspace_created',
       entityType: 'workspace',
-      entityId: workspaceId,
+      entityId: workspace._id,
       entityTitle: name.trim(),
       details: 'Created new workspace'
     });
 
     res.status(201).json({
       workspace: {
-        id: workspaceId,
-        name: name.trim(),
-        description: (description || '').trim(),
-        invite_code: inviteCode,
+        id: workspace._id.toString(),
+        name: workspace.name,
+        description: workspace.description,
+        invite_code: workspace.inviteCode,
         owner_id: req.user.id,
         my_role: 'owner',
-        created_at: now,
-        updated_at: now,
+        created_at: workspace.createdAt.toISOString(),
+        updated_at: workspace.updatedAt.toISOString(),
         member_count: 1,
         doc_count: 0,
         whiteboard_count: 0
@@ -94,41 +102,36 @@ router.post('/', (req, res) => {
 });
 
 // Join workspace by invite code
-router.post('/join/:inviteCode', (req, res) => {
+router.post('/join/:inviteCode', async (req, res) => {
   try {
     const { inviteCode } = req.params;
     if (!inviteCode) {
       return res.status(400).json({ error: 'Invite code is required.' });
     }
 
-    const wsStmt = db.prepare('SELECT id, name, owner_id FROM workspaces WHERE invite_code = ?');
-    const workspace = wsStmt.get(inviteCode.trim());
-
+    const workspace = await Workspace.findOne({ inviteCode: inviteCode.trim() });
     if (!workspace) {
       return res.status(404).json({ error: 'Invalid invitation code or workspace does not exist.' });
     }
 
-    // Check if already a member
-    const checkStmt = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?');
-    const existing = checkStmt.get(workspace.id, req.user.id);
-
-    if (existing) {
+    const existingMember = workspace.members.find((m) => m.userId.toString() === req.user.id);
+    if (existingMember) {
       return res.json({
         message: 'You are already a member of this workspace.',
-        workspaceId: workspace.id,
-        role: existing.role
+        workspaceId: workspace._id.toString(),
+        role: existingMember.role
       });
     }
 
-    const now = new Date().toISOString();
-    const insertMember = db.prepare(`
-      INSERT INTO workspace_members (id, workspace_id, user_id, role, joined_at)
-      VALUES (?, ?, ?, 'member', ?)
-    `);
-    insertMember.run(crypto.randomUUID(), workspace.id, req.user.id, now);
+    workspace.members.push({
+      userId: req.user.id,
+      role: 'member',
+      joinedAt: new Date()
+    });
+    await workspace.save();
 
-    logActivity({
-      workspaceId: workspace.id,
+    await logActivity({
+      workspaceId: workspace._id,
       userId: req.user.id,
       userName: req.user.name,
       action: 'member_joined',
@@ -140,7 +143,7 @@ router.post('/join/:inviteCode', (req, res) => {
 
     res.json({
       message: 'Successfully joined workspace.',
-      workspaceId: workspace.id,
+      workspaceId: workspace._id.toString(),
       name: workspace.name,
       role: 'member'
     });
@@ -150,64 +153,72 @@ router.post('/join/:inviteCode', (req, res) => {
   }
 });
 
-// Get workspace details (including projects, documents, whiteboards, members)
-router.get('/:workspaceId', requireWorkspaceMember(), (req, res) => {
+// Get workspace details
+router.get('/:workspaceId', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId } = req.params;
+    const workspace = await Workspace.findById(workspaceId).populate('members.userId', 'name email avatarColor bio');
 
-    const wsStmt = db.prepare(`
-      SELECT w.*, u.name as owner_name, u.email as owner_email
-      FROM workspaces w
-      JOIN users u ON u.id = w.owner_id
-      WHERE w.id = ?
-    `);
-    const workspace = wsStmt.get(workspaceId);
+    const projects = await Project.find({ workspaceId }).sort({ createdAt: 1 });
+    const documents = await Document.find({ workspaceId }).populate('createdBy', 'name').sort({ updatedAt: -1 });
+    const whiteboards = await Whiteboard.find({ workspaceId }).populate('createdBy', 'name').sort({ updatedAt: -1 });
 
-    const membersStmt = db.prepare(`
-      SELECT wm.id as membership_id, wm.role, wm.joined_at, u.id as user_id, u.name, u.email, u.avatar_color, u.bio
-      FROM workspace_members wm
-      JOIN users u ON u.id = wm.user_id
-      WHERE wm.workspace_id = ?
-      ORDER BY wm.joined_at ASC
-    `);
-    const members = membersStmt.all(workspaceId);
+    const formattedMembers = workspace.members.map((m) => ({
+      membership_id: m._id.toString(),
+      user_id: m.userId?._id?.toString() || m.userId?.toString(),
+      name: m.userId?.name || 'User',
+      email: m.userId?.email || '',
+      avatar_color: m.userId?.avatarColor || '#111111',
+      bio: m.userId?.bio || '',
+      role: m.role,
+      joined_at: m.joinedAt.toISOString()
+    }));
 
-    const projectsStmt = db.prepare(`
-      SELECT p.*, (SELECT COUNT(*) FROM documents WHERE project_id = p.id) as doc_count
-      FROM projects p
-      WHERE p.workspace_id = ?
-      ORDER BY p.created_at ASC
-    `);
-    const projects = projectsStmt.all(workspaceId);
+    const formattedDocs = documents.map((d) => ({
+      id: d._id.toString(),
+      workspace_id: d.workspaceId.toString(),
+      project_id: d.projectId ? d.projectId.toString() : null,
+      title: d.title,
+      template_type: d.templateType,
+      version: d.version,
+      creator_name: d.createdBy?.name || 'Author',
+      section_count: d.sections?.length || 0,
+      created_at: d.createdAt.toISOString(),
+      updated_at: d.updatedAt.toISOString()
+    }));
 
-    const docsStmt = db.prepare(`
-      SELECT d.*, u.name as creator_name,
-             (SELECT COUNT(*) FROM document_sections WHERE document_id = d.id) as section_count
-      FROM documents d
-      JOIN users u ON u.id = d.created_by
-      WHERE d.workspace_id = ?
-      ORDER BY d.updated_at DESC
-    `);
-    const documents = docsStmt.all(workspaceId);
+    const formattedWhiteboards = whiteboards.map((w) => ({
+      id: w._id.toString(),
+      workspace_id: w.workspaceId.toString(),
+      project_id: w.projectId ? w.projectId.toString() : null,
+      title: w.title,
+      version: w.version,
+      creator_name: w.createdBy?.name || 'Author',
+      created_at: w.createdAt.toISOString(),
+      updated_at: w.updatedAt.toISOString()
+    }));
 
-    const wbStmt = db.prepare(`
-      SELECT w.id, w.workspace_id, w.project_id, w.title, w.version, w.created_by, w.created_at, w.updated_at, u.name as creator_name
-      FROM whiteboards w
-      JOIN users u ON u.id = w.created_by
-      WHERE w.workspace_id = ?
-      ORDER BY w.updated_at DESC
-    `);
-    const whiteboards = wbStmt.all(workspaceId);
+    const formattedProjects = projects.map((p) => ({
+      id: p._id.toString(),
+      workspace_id: p.workspaceId.toString(),
+      name: p.name,
+      description: p.description,
+      doc_count: formattedDocs.filter((d) => d.project_id === p._id.toString()).length
+    }));
 
     res.json({
       workspace: {
-        ...workspace,
+        id: workspace._id.toString(),
+        name: workspace.name,
+        description: workspace.description,
+        invite_code: workspace.inviteCode,
+        owner_id: workspace.ownerId.toString(),
         myRole: req.workspaceMember.role
       },
-      members,
-      projects,
-      documents,
-      whiteboards
+      members: formattedMembers,
+      projects: formattedProjects,
+      documents: formattedDocs,
+      whiteboards: formattedWhiteboards
     });
   } catch (err) {
     console.error('Get workspace details error:', err);
@@ -215,8 +226,8 @@ router.get('/:workspaceId', requireWorkspaceMember(), (req, res) => {
   }
 });
 
-// Update workspace (admin/owner only)
-router.put('/:workspaceId', requireWorkspaceMember(['owner', 'admin']), (req, res) => {
+// Update workspace
+router.put('/:workspaceId', requireWorkspaceMember(['owner', 'admin']), async (req, res) => {
   try {
     const { workspaceId } = req.params;
     const { name, description } = req.body;
@@ -225,13 +236,10 @@ router.put('/:workspaceId', requireWorkspaceMember(['owner', 'admin']), (req, re
       return res.status(400).json({ error: 'Workspace name is required.' });
     }
 
-    const now = new Date().toISOString();
-    const updateStmt = db.prepare(`
-      UPDATE workspaces
-      SET name = ?, description = ?, updated_at = ?
-      WHERE id = ?
-    `);
-    updateStmt.run(name.trim(), (description || '').trim(), now, workspaceId);
+    await Workspace.findByIdAndUpdate(workspaceId, {
+      name: name.trim(),
+      description: (description || '').trim()
+    });
 
     res.json({ message: 'Workspace updated successfully.' });
   } catch (err) {
@@ -240,12 +248,14 @@ router.put('/:workspaceId', requireWorkspaceMember(['owner', 'admin']), (req, re
   }
 });
 
-// Delete workspace (owner only)
-router.delete('/:workspaceId', requireWorkspaceMember(['owner']), (req, res) => {
+// Delete workspace
+router.delete('/:workspaceId', requireWorkspaceMember(['owner']), async (req, res) => {
   try {
     const { workspaceId } = req.params;
-    const delStmt = db.prepare('DELETE FROM workspaces WHERE id = ?');
-    delStmt.run(workspaceId);
+    await Workspace.findByIdAndDelete(workspaceId);
+    await Document.deleteMany({ workspaceId });
+    await Whiteboard.deleteMany({ workspaceId });
+    await Project.deleteMany({ workspaceId });
 
     res.json({ message: 'Workspace deleted successfully.' });
   } catch (err) {
@@ -254,8 +264,8 @@ router.delete('/:workspaceId', requireWorkspaceMember(['owner']), (req, res) => 
   }
 });
 
-// Create a project/folder within workspace
-router.post('/:workspaceId/projects', requireWorkspaceMember(['owner', 'admin', 'member']), (req, res) => {
+// Create project/folder
+router.post('/:workspaceId/projects', requireWorkspaceMember(['owner', 'admin', 'member']), async (req, res) => {
   try {
     const { workspaceId } = req.params;
     const { name, description } = req.body;
@@ -264,34 +274,32 @@ router.post('/:workspaceId/projects', requireWorkspaceMember(['owner', 'admin', 
       return res.status(400).json({ error: 'Project name is required.' });
     }
 
-    const projectId = crypto.randomUUID();
-    const now = new Date().toISOString();
+    const project = await Project.create({
+      workspaceId,
+      name: name.trim(),
+      description: (description || '').trim(),
+      createdBy: req.user.id
+    });
 
-    const insertProj = db.prepare(`
-      INSERT INTO projects (id, workspace_id, name, description, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    insertProj.run(projectId, workspaceId, name.trim(), (description || '').trim(), req.user.id, now);
-
-    logActivity({
+    await logActivity({
       workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'project_created',
       entityType: 'project',
-      entityId: projectId,
+      entityId: project._id,
       entityTitle: name.trim(),
       details: 'Created folder/project'
     });
 
     res.status(201).json({
       project: {
-        id: projectId,
+        id: project._id.toString(),
         workspace_id: workspaceId,
-        name: name.trim(),
-        description: (description || '').trim(),
+        name: project.name,
+        description: project.description,
         created_by: req.user.id,
-        created_at: now,
+        created_at: project.createdAt.toISOString(),
         doc_count: 0
       }
     });
@@ -301,8 +309,8 @@ router.post('/:workspaceId/projects', requireWorkspaceMember(['owner', 'admin', 
   }
 });
 
-// Update member role (owner or admin)
-router.put('/:workspaceId/members/:targetUserId', requireWorkspaceMember(['owner', 'admin']), (req, res) => {
+// Update member role
+router.put('/:workspaceId/members/:targetUserId', requireWorkspaceMember(['owner', 'admin']), async (req, res) => {
   try {
     const { workspaceId, targetUserId } = req.params;
     const { role } = req.body;
@@ -311,18 +319,18 @@ router.put('/:workspaceId/members/:targetUserId', requireWorkspaceMember(['owner
       return res.status(400).json({ error: 'Invalid role specified.' });
     }
 
-    // Owner cannot change their own role here
-    const ws = db.prepare('SELECT owner_id FROM workspaces WHERE id = ?').get(workspaceId);
-    if (ws.owner_id === targetUserId) {
+    const workspace = req.workspace;
+    if (workspace.ownerId.toString() === targetUserId) {
       return res.status(400).json({ error: 'Cannot modify workspace owner role.' });
     }
 
-    const updateStmt = db.prepare(`
-      UPDATE workspace_members
-      SET role = ?
-      WHERE workspace_id = ? AND user_id = ?
-    `);
-    updateStmt.run(role, workspaceId, targetUserId);
+    const member = workspace.members.find((m) => m.userId.toString() === targetUserId);
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found in workspace.' });
+    }
+
+    member.role = role;
+    await workspace.save();
 
     res.json({ message: 'Member role updated.' });
   } catch (err) {
@@ -331,14 +339,14 @@ router.put('/:workspaceId/members/:targetUserId', requireWorkspaceMember(['owner
   }
 });
 
-// Remove member or leave workspace
-router.delete('/:workspaceId/members/:targetUserId', requireWorkspaceMember(), (req, res) => {
+// Remove member or leave
+router.delete('/:workspaceId/members/:targetUserId', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId, targetUserId } = req.params;
     const isSelf = req.user.id === targetUserId;
+    const workspace = req.workspace;
 
-    const ws = db.prepare('SELECT owner_id FROM workspaces WHERE id = ?').get(workspaceId);
-    if (ws.owner_id === targetUserId) {
+    if (workspace.ownerId.toString() === targetUserId) {
       return res.status(400).json({ error: 'Workspace owner cannot leave or be removed.' });
     }
 
@@ -346,15 +354,23 @@ router.delete('/:workspaceId/members/:targetUserId', requireWorkspaceMember(), (
       return res.status(403).json({ error: 'Only owners and admins can remove other members.' });
     }
 
-    const delStmt = db.prepare('DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?');
-    delStmt.run(workspaceId, targetUserId);
+    workspace.members = workspace.members.filter((m) => m.userId.toString() !== targetUserId);
+    await workspace.save();
 
-    // Also unassign any sections assigned to this user in this workspace
-    db.prepare(`
-      UPDATE document_sections
-      SET assigned_to = NULL, assigned_name = NULL, locked_by = NULL, locked_by_name = NULL, locked_at = NULL
-      WHERE assigned_to = ? AND document_id IN (SELECT id FROM documents WHERE workspace_id = ?)
-    `).run(targetUserId, workspaceId);
+    // Unassign sections in this workspace
+    await Document.updateMany(
+      { workspaceId, 'sections.assignedTo': targetUserId },
+      {
+        $set: {
+          'sections.$[elem].assignedTo': null,
+          'sections.$[elem].assignedName': null,
+          'sections.$[elem].lockedBy': null,
+          'sections.$[elem].lockedByName': null,
+          'sections.$[elem].lockedAt': null
+        }
+      },
+      { arrayFilters: [{ 'elem.assignedTo': targetUserId }] }
+    );
 
     res.json({ message: isSelf ? 'You have left the workspace.' : 'Member removed.' });
   } catch (err) {
@@ -363,12 +379,12 @@ router.delete('/:workspaceId/members/:targetUserId', requireWorkspaceMember(), (
   }
 });
 
-// Generate or regenerate invitation code
-router.post('/:workspaceId/invite-link', requireWorkspaceMember(['owner', 'admin']), (req, res) => {
+// Regenerate invite link
+router.post('/:workspaceId/invite-link', requireWorkspaceMember(['owner', 'admin']), async (req, res) => {
   try {
     const { workspaceId } = req.params;
     const newCode = crypto.randomBytes(6).toString('hex');
-    db.prepare('UPDATE workspaces SET invite_code = ? WHERE id = ?').run(newCode, workspaceId);
+    await Workspace.findByIdAndUpdate(workspaceId, { inviteCode: newCode });
 
     res.json({ inviteCode: newCode });
   } catch (err) {

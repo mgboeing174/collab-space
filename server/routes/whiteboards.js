@@ -1,6 +1,6 @@
 import express from 'express';
-import crypto from 'crypto';
-import db, { logActivity } from '../db/database.js';
+import Whiteboard from '../models/Whiteboard.js';
+import { logActivity } from '../db/database.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireWorkspaceMember, requireWhiteboardAccess } from '../middleware/permissions.js';
 
@@ -8,20 +8,27 @@ const router = express.Router();
 router.use(authenticateToken);
 
 // Get whiteboards in workspace
-router.get('/workspace/:workspaceId', requireWorkspaceMember(), (req, res) => {
+router.get('/workspace/:workspaceId', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId } = req.params;
-    const stmt = db.prepare(`
-      SELECT w.id, w.workspace_id, w.project_id, w.title, w.version, w.created_by, w.created_at, w.updated_at,
-             u.name as creator_name, p.name as project_name
-      FROM whiteboards w
-      JOIN users u ON u.id = w.created_by
-      LEFT JOIN projects p ON p.id = w.project_id
-      WHERE w.workspace_id = ?
-      ORDER BY w.updated_at DESC
-    `);
-    const whiteboards = stmt.all(workspaceId);
-    res.json({ whiteboards });
+    const whiteboards = await Whiteboard.find({ workspaceId })
+      .populate('createdBy', 'name')
+      .populate('projectId', 'name')
+      .sort({ updatedAt: -1 });
+
+    const formatted = whiteboards.map((w) => ({
+      id: w._id.toString(),
+      workspace_id: w.workspaceId.toString(),
+      project_id: w.projectId ? w.projectId._id.toString() : null,
+      project_name: w.projectId ? w.projectId.name : null,
+      title: w.title,
+      version: w.version,
+      creator_name: w.createdBy ? w.createdBy.name : 'Author',
+      created_at: w.createdAt.toISOString(),
+      updated_at: w.updatedAt.toISOString()
+    }));
+
+    res.json({ whiteboards: formatted });
   } catch (err) {
     console.error('Fetch whiteboards error:', err);
     res.status(500).json({ error: 'Failed to fetch whiteboards.' });
@@ -29,44 +36,43 @@ router.get('/workspace/:workspaceId', requireWorkspaceMember(), (req, res) => {
 });
 
 // Create whiteboard
-router.post('/', requireWorkspaceMember(), (req, res) => {
+router.post('/', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId, projectId, title = 'Untitled Whiteboard' } = req.body;
     if (!workspaceId) {
       return res.status(400).json({ error: 'Workspace ID is required.' });
     }
 
-    const whiteboardId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const initialData = JSON.stringify([]);
+    const whiteboard = await Whiteboard.create({
+      workspaceId,
+      projectId: projectId || null,
+      title: title.trim(),
+      canvasData: [],
+      version: 1,
+      createdBy: req.user.id
+    });
 
-    const insertStmt = db.prepare(`
-      INSERT INTO whiteboards (id, workspace_id, project_id, title, canvas_data, version, created_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
-    `);
-    insertStmt.run(whiteboardId, workspaceId, projectId || null, title.trim(), initialData, req.user.id, now, now);
-
-    logActivity({
+    await logActivity({
       workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'whiteboard_created',
       entityType: 'whiteboard',
-      entityId: whiteboardId,
+      entityId: whiteboard._id,
       entityTitle: title.trim(),
       details: 'Created collaborative whiteboard'
     });
 
     res.status(201).json({
       whiteboard: {
-        id: whiteboardId,
+        id: whiteboard._id.toString(),
         workspace_id: workspaceId,
         project_id: projectId || null,
-        title: title.trim(),
-        version: 1,
+        title: whiteboard.title,
+        version: whiteboard.version,
         created_by: req.user.id,
-        created_at: now,
-        updated_at: now
+        created_at: whiteboard.createdAt.toISOString(),
+        updated_at: whiteboard.updatedAt.toISOString()
       }
     });
   } catch (err) {
@@ -76,29 +82,26 @@ router.post('/', requireWorkspaceMember(), (req, res) => {
 });
 
 // Get single whiteboard
-router.get('/:id', requireWhiteboardAccess, (req, res) => {
+router.get('/:id', requireWhiteboardAccess, async (req, res) => {
   try {
     const { id } = req.params;
-    const stmt = db.prepare(`
-      SELECT w.*, u.name as creator_name, p.name as project_name
-      FROM whiteboards w
-      JOIN users u ON u.id = w.created_by
-      LEFT JOIN projects p ON p.id = w.project_id
-      WHERE w.id = ?
-    `);
-    const whiteboard = stmt.get(id);
-
-    let canvasElements = [];
-    try {
-      canvasElements = JSON.parse(whiteboard.canvas_data || '[]');
-    } catch (parseErr) {
-      canvasElements = [];
-    }
+    const whiteboard = await Whiteboard.findById(id)
+      .populate('createdBy', 'name')
+      .populate('projectId', 'name');
 
     res.json({
       whiteboard: {
-        ...whiteboard,
-        canvasElements
+        id: whiteboard._id.toString(),
+        workspace_id: whiteboard.workspaceId.toString(),
+        project_id: whiteboard.projectId ? whiteboard.projectId._id.toString() : null,
+        project_name: whiteboard.projectId ? whiteboard.projectId.name : null,
+        title: whiteboard.title,
+        version: whiteboard.version,
+        created_by: whiteboard.createdBy ? whiteboard.createdBy._id.toString() : null,
+        creator_name: whiteboard.createdBy ? whiteboard.createdBy.name : 'Author',
+        canvasElements: whiteboard.canvasData || [],
+        created_at: whiteboard.createdAt.toISOString(),
+        updated_at: whiteboard.updatedAt.toISOString()
       },
       currentUserRole: req.workspaceMember.role
     });
@@ -109,30 +112,18 @@ router.get('/:id', requireWhiteboardAccess, (req, res) => {
 });
 
 // Update whiteboard (canvas data and/or title)
-router.put('/:id', requireWhiteboardAccess, (req, res) => {
+router.put('/:id', requireWhiteboardAccess, async (req, res) => {
   try {
     const { id } = req.params;
     const { title, canvasElements } = req.body;
-    const now = new Date().toISOString();
 
-    let canvasDataString = undefined;
-    if (canvasElements !== undefined) {
-      canvasDataString = typeof canvasElements === 'string' ? canvasElements : JSON.stringify(canvasElements);
-    }
+    const whiteboard = req.whiteboard;
+    if (title) whiteboard.title = title.trim();
+    if (canvasElements !== undefined) whiteboard.canvasData = canvasElements;
+    whiteboard.version = (whiteboard.version || 0) + 1;
+    await whiteboard.save();
 
-    const nextVersion = req.whiteboard.version + 1;
-
-    const updateStmt = db.prepare(`
-      UPDATE whiteboards
-      SET title = COALESCE(?, title),
-          canvas_data = COALESCE(?, canvas_data),
-          version = ?,
-          updated_at = ?
-      WHERE id = ?
-    `);
-    updateStmt.run(title ? title.trim() : null, canvasDataString || null, nextVersion, now, id);
-
-    res.json({ message: 'Whiteboard saved.', version: nextVersion });
+    res.json({ message: 'Whiteboard saved.', version: whiteboard.version });
   } catch (err) {
     console.error('Update whiteboard error:', err);
     res.status(500).json({ error: 'Failed to update whiteboard.' });
@@ -140,17 +131,17 @@ router.put('/:id', requireWhiteboardAccess, (req, res) => {
 });
 
 // Delete whiteboard
-router.delete('/:id', requireWhiteboardAccess, (req, res) => {
+router.delete('/:id', requireWhiteboardAccess, async (req, res) => {
   try {
     const { id } = req.params;
     if (req.workspaceMember.role === 'viewer') {
       return res.status(403).json({ error: 'Viewers cannot delete whiteboards.' });
     }
 
-    db.prepare('DELETE FROM whiteboards WHERE id = ?').run(id);
+    await Whiteboard.findByIdAndDelete(id);
 
-    logActivity({
-      workspaceId: req.whiteboard.workspace_id,
+    await logActivity({
+      workspaceId: req.whiteboard.workspaceId,
       userId: req.user.id,
       userName: req.user.name,
       action: 'whiteboard_deleted',
@@ -164,29 +155,6 @@ router.delete('/:id', requireWhiteboardAccess, (req, res) => {
   } catch (err) {
     console.error('Delete whiteboard error:', err);
     res.status(500).json({ error: 'Failed to delete whiteboard.' });
-  }
-});
-
-// Save whiteboard snapshot version
-router.post('/:id/snapshot', requireWhiteboardAccess, (req, res) => {
-  try {
-    const { id } = req.params;
-    const { title = 'Snapshot' } = req.body;
-
-    const latestVersion = db.prepare('SELECT MAX(version_number) as max_v FROM whiteboard_versions WHERE whiteboard_id = ?').get(id);
-    const nextVersionNum = (latestVersion?.max_v || 0) + 1;
-    const now = new Date().toISOString();
-
-    const insertStmt = db.prepare(`
-      INSERT INTO whiteboard_versions (id, whiteboard_id, version_number, title, canvas_snapshot, created_by, created_by_name, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertStmt.run(crypto.randomUUID(), id, nextVersionNum, title.trim(), req.whiteboard.canvas_data, req.user.id, req.user.name, now);
-
-    res.status(201).json({ message: 'Whiteboard snapshot saved.', version: nextVersionNum });
-  } catch (err) {
-    console.error('Snapshot error:', err);
-    res.status(500).json({ error: 'Failed to create whiteboard snapshot.' });
   }
 });
 

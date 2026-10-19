@@ -1,12 +1,13 @@
 import express from 'express';
-import db from '../db/database.js';
+import Document from '../models/Document.js';
+import Whiteboard from '../models/Whiteboard.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireWorkspaceMember } from '../middleware/permissions.js';
 
 const router = express.Router();
 router.use(authenticateToken);
 
-router.get('/workspace/:workspaceId', requireWorkspaceMember(), (req, res) => {
+router.get('/workspace/:workspaceId', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId } = req.params;
     const query = (req.query.q || '').trim();
@@ -15,46 +16,61 @@ router.get('/workspace/:workspaceId', requireWorkspaceMember(), (req, res) => {
       return res.json({ documents: [], sections: [], whiteboards: [] });
     }
 
-    const searchPattern = `%${query}%`;
+    const regex = new RegExp(query, 'i');
 
-    // Search documents
-    const docStmt = db.prepare(`
-      SELECT d.id, d.title, d.template_type, d.updated_at, u.name as creator_name
-      FROM documents d
-      JOIN users u ON u.id = d.created_by
-      WHERE d.workspace_id = ? AND d.title LIKE ?
-      ORDER BY d.updated_at DESC
-      LIMIT 10
-    `);
-    const documents = docStmt.all(workspaceId, searchPattern);
+    // Search documents by title
+    const docs = await Document.find({ workspaceId, title: regex })
+      .populate('createdBy', 'name')
+      .sort({ updatedAt: -1 })
+      .limit(10);
 
-    // Search inside document sections
-    const sectionStmt = db.prepare(`
-      SELECT s.id as section_id, s.document_id, s.title as section_title, s.content,
-             d.title as document_title
-      FROM document_sections s
-      JOIN documents d ON d.id = s.document_id
-      WHERE d.workspace_id = ? AND (s.title LIKE ? OR s.content LIKE ?)
-      LIMIT 15
-    `);
-    const sections = sectionStmt.all(workspaceId, searchPattern, searchPattern);
+    const formattedDocs = docs.map((d) => ({
+      id: d._id.toString(),
+      title: d.title,
+      template_type: d.templateType,
+      updated_at: d.updatedAt.toISOString(),
+      creator_name: d.createdBy?.name || 'Author'
+    }));
+
+    // Search inside sections
+    const docsWithMatchingSections = await Document.find({
+      workspaceId,
+      $or: [{ 'sections.title': regex }, { 'sections.content': regex }]
+    });
+
+    const matchingSections = [];
+    docsWithMatchingSections.forEach((d) => {
+      d.sections.forEach((s) => {
+        if (regex.test(s.title) || regex.test(s.content)) {
+          matchingSections.push({
+            section_id: s._id.toString(),
+            document_id: d._id.toString(),
+            section_title: s.title,
+            content: s.content,
+            document_title: d.title
+          });
+        }
+      });
+    });
 
     // Search whiteboards
-    const wbStmt = db.prepare(`
-      SELECT w.id, w.title, w.updated_at, u.name as creator_name
-      FROM whiteboards w
-      JOIN users u ON u.id = w.created_by
-      WHERE w.workspace_id = ? AND w.title LIKE ?
-      ORDER BY w.updated_at DESC
-      LIMIT 10
-    `);
-    const whiteboards = wbStmt.all(workspaceId, searchPattern);
+    const whiteboards = await Whiteboard.find({ workspaceId, title: regex })
+      .populate('createdBy', 'name')
+      .sort({ updatedAt: -1 })
+      .limit(10);
+
+    const formattedWbs = whiteboards.map((w) => ({
+      id: w._id.toString(),
+      title: w.title,
+      updated_at: w.updatedAt.toISOString(),
+      creator_name: w.createdBy?.name || 'Author'
+    }));
 
     res.json({
       query,
-      documents,
-      sections,
-      whiteboards
+      documents: formattedDocs,
+      sections: matchingSections.slice(0, 15),
+      whiteboards: formattedWbs
     });
   } catch (err) {
     console.error('Search error:', err);
