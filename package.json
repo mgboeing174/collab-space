@@ -1,0 +1,25 @@
+{
+  "name": "collabspace",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "CollabSpace — A Real-Time Collaborative Workspace",
+  "scripts": {
+    "server": "npm --prefix server start",
+    "server:dev": "npm --prefix server run dev",
+    "client": "npm --prefix client dev",
+    "client:build": "npm --prefix client run build",
+    "start": "npm --prefix server start",
+    "build": "npm --prefix client run build"
+  },
+  "keywords": [
+    "collaboration",
+    "realtime",
+    "documents",
+    "whiteboard",
+    "socketio",
+    "react",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT"
+}
