@@ -22,7 +22,13 @@ export default function LoginPage() {
     try {
       setLoading(true);
       await login(email, password);
-      navigate('/workspaces');
+      const pendingInvite = sessionStorage.getItem('collabspace_pending_invite');
+      if (pendingInvite) {
+        sessionStorage.removeItem('collabspace_pending_invite');
+        navigate(`/join/${pendingInvite}`);
+      } else {
+        navigate('/workspaces');
+      }
     } catch (err) {
       setError(err.message || 'Login failed. Please check your credentials.');
     } finally {

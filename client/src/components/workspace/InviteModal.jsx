@@ -43,11 +43,15 @@ export default function InviteModal({ isOpen, onClose, workspace }) {
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Invite Collaborators" maxWidth="480px">
+    <Modal isOpen={isOpen} onClose={onClose} title={`Invite to ${workspace?.name || 'Workspace'}`} maxWidth="480px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
         <div>
-          <p style={{ fontSize: '13.5px', color: '#555555', marginBottom: '12px' }}>
-            Invite teammates to collaborate in <strong>{workspace?.name}</strong>. Anyone with this link or code can join with member access.
+          <div style={{ padding: '8px 12px', background: '#f5f5f5', borderRadius: '6px', marginBottom: '12px', border: '1px solid #e0e0e0' }}>
+            <span style={{ fontSize: '12px', color: '#666666' }}>Workspace: </span>
+            <strong style={{ fontSize: '13px', color: '#111111' }}>{workspace?.name}</strong>
+          </div>
+          <p style={{ fontSize: '13px', color: '#555555', marginBottom: '12px' }}>
+            Each workspace has its own unique 12-character code. Teammates joining with this code will <strong>only</strong> get access to <strong>{workspace?.name}</strong> and cannot see your other private workspaces.
           </p>
 
           <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#111111', marginBottom: '6px' }}>

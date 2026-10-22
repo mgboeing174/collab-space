@@ -29,7 +29,13 @@ export default function RegisterPage() {
     try {
       setLoading(true);
       await register(name.trim(), email.trim(), password);
-      navigate('/workspaces');
+      const pendingInvite = sessionStorage.getItem('collabspace_pending_invite');
+      if (pendingInvite) {
+        sessionStorage.removeItem('collabspace_pending_invite');
+        navigate(`/join/${pendingInvite}`);
+      } else {
+        navigate('/workspaces');
+      }
     } catch (err) {
       setError(err.message || 'Registration failed. Please try again.');
     } finally {

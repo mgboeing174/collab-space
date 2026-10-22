@@ -311,6 +311,11 @@ export function setupSockets(io) {
       socket.to(roomKey).emit('whiteboard_element_added', { whiteboardId, element });
     });
 
+    socket.on('whiteboard_element_live_draw', ({ whiteboardId, element }) => {
+      const roomKey = `board:${whiteboardId}`;
+      socket.to(roomKey).emit('whiteboard_element_live_drawing', { whiteboardId, element });
+    });
+
     socket.on('whiteboard_element_update', ({ whiteboardId, element }) => {
       const roomKey = `board:${whiteboardId}`;
       socket.to(roomKey).emit('whiteboard_element_updated', { whiteboardId, element });

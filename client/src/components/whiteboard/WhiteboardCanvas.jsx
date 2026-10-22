@@ -66,6 +66,7 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
   const isDraggingElementRef = useRef(false);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const saveTimeoutRef = useRef(null);
+  const liveDrawThrottleRef = useRef(0);
 
   // Load initial elements
   useEffect(() => {
@@ -102,6 +103,19 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
       }
     };
 
+    const handleElementLiveDrawing = ({ whiteboardId: wbId, element }) => {
+      if (wbId === whiteboardId) {
+        setElements((prev) => {
+          const exists = prev.some((el) => el.id === element.id);
+          if (exists) {
+            return prev.map((el) => (el.id === element.id ? element : el));
+          } else {
+            return [...prev, element];
+          }
+        });
+      }
+    };
+
     const handleElementUpdated = ({ whiteboardId: wbId, element }) => {
       if (wbId === whiteboardId) {
         setElements((prev) => prev.map((el) => (el.id === element.id ? element : el)));
@@ -122,6 +136,7 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
 
     socket.on('whiteboard_cursor_update', handleRemoteCursor);
     socket.on('whiteboard_element_added', handleElementAdded);
+    socket.on('whiteboard_element_live_drawing', handleElementLiveDrawing);
     socket.on('whiteboard_element_updated', handleElementUpdated);
     socket.on('whiteboard_element_deleted', handleElementDeleted);
     socket.on('whiteboard_synced', handleWhiteboardSynced);
@@ -130,6 +145,7 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
       socket.emit('leave_whiteboard', { whiteboardId });
       socket.off('whiteboard_cursor_update', handleRemoteCursor);
       socket.off('whiteboard_element_added', handleElementAdded);
+      socket.off('whiteboard_element_live_drawing', handleElementLiveDrawing);
       socket.off('whiteboard_element_updated', handleElementUpdated);
       socket.off('whiteboard_element_deleted', handleElementDeleted);
       socket.off('whiteboard_synced', handleWhiteboardSynced);
@@ -436,6 +452,16 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
       shape.endX = coords.x;
       shape.endY = coords.y;
       setElements((prev) => prev.map((el) => (el.id === shape.id ? { ...shape } : el)));
+    }
+
+    // Broadcast in-progress drawing to other collaborators in real-time
+    const now = Date.now();
+    if (socket && now - liveDrawThrottleRef.current > 35) {
+      liveDrawThrottleRef.current = now;
+      socket.emit('whiteboard_element_live_draw', {
+        whiteboardId,
+        element: { ...shape }
+      });
     }
   };
 
