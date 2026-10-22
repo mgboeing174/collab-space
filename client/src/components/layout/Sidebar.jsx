@@ -18,7 +18,7 @@ import { api } from '../../utils/api.js';
 import TemplatePickerModal from '../workspace/TemplatePickerModal.jsx';
 import Modal from '../common/Modal.jsx';
 
-export default function Sidebar() {
+export default function Sidebar({ isOpenMobile = false, onCloseMobile }) {
   const { currentWorkspace, currentWorkspaceId, refreshCurrentWorkspace } = useWorkspace();
   const navigate = useNavigate();
   const location = useLocation();
@@ -68,6 +68,7 @@ export default function Sidebar() {
 
   return (
     <aside
+      className={`sidebar-responsive ${isOpenMobile ? 'open' : ''}`}
       style={{
         width: '240px',
         minWidth: '240px',

@@ -10,7 +10,8 @@ import {
   LogOut,
   FolderPlus,
   Share2,
-  Settings
+  Settings,
+  Menu
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { useWorkspace } from '../../context/WorkspaceContext.jsx';
@@ -18,7 +19,7 @@ import Avatar from '../common/Avatar.jsx';
 import SearchModal from '../common/SearchModal.jsx';
 import InviteModal from '../workspace/InviteModal.jsx';
 
-export default function Navbar({ onToggleActivity, unreadCount = 0 }) {
+export default function Navbar({ onToggleActivity, onToggleMobileSidebar, unreadCount = 0 }) {
   const { user, logout } = useAuth();
   const { workspaces, currentWorkspaceId, currentWorkspace, switchWorkspace, onlineMembers } = useWorkspace();
   const navigate = useNavigate();
@@ -47,7 +48,18 @@ export default function Navbar({ onToggleActivity, unreadCount = 0 }) {
         }}
       >
         {/* Left: Brand & Workspace Switcher */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {/* Mobile hamburger menu toggle */}
+          {onToggleMobileSidebar && (
+            <button
+              onClick={onToggleMobileSidebar}
+              className="mobile-nav-toggle"
+              title="Toggle Menu"
+            >
+              <Menu size={20} />
+            </button>
+          )}
+
           <div
             onClick={() => navigate('/workspaces')}
             style={{
@@ -185,7 +197,7 @@ export default function Navbar({ onToggleActivity, unreadCount = 0 }) {
         </div>
 
         {/* Center: Search Trigger */}
-        <div style={{ flex: 1, maxWidth: '420px', margin: '0 16px' }}>
+        <div className="navbar-search-bar" style={{ flex: 1, maxWidth: '420px', margin: '0 16px' }}>
           <button
             onClick={() => setSearchOpen(true)}
             style={{
@@ -226,6 +238,7 @@ export default function Navbar({ onToggleActivity, unreadCount = 0 }) {
           {/* Online Members Presence Pill Strip */}
           {onlineMembers.length > 0 && (
             <div
+              className="navbar-online-strip"
               style={{
                 display: 'flex',
                 alignItems: 'center',

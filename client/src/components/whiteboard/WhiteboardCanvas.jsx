@@ -603,6 +603,7 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
     >
       {/* Floating Top Collaboration & Toolbar Strip */}
       <div
+        className="whiteboard-toolbar-strip"
         style={{
           position: 'absolute',
           top: '12px',
