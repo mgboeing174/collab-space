@@ -4,9 +4,10 @@
   "type": "module",
   "description": "CollabSpace — A Real-Time Collaborative Workspace",
   "scripts": {
+    "dev": "concurrently -n \"server,client\" -c \"cyan,magenta\" \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
     "server": "npm --prefix server start",
     "server:dev": "npm --prefix server run dev",
-    "client": "npm --prefix client dev",
+    "client": "npm --prefix client run dev",
     "client:build": "npm --prefix client run build",
     "start": "npm --prefix server start",
     "build": "npm --prefix client run build"
@@ -18,8 +19,12 @@
     "whiteboard",
     "socketio",
     "react",
-    "express"
+    "express",
+    "mongodb"
   ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
 }
