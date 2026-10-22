@@ -5,6 +5,7 @@
   "description": "CollabSpace — A Real-Time Collaborative Workspace",
   "scripts": {
     "dev": "concurrently -n \"server,client\" -c \"cyan,magenta\" \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "users": "node ./server/list-users.js",
     "server": "npm --prefix server start",
     "server:dev": "npm --prefix server run dev",
     "client": "npm --prefix client run dev",
