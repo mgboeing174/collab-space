@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import Activity from '../models/Activity.js';
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/collabspace';
+const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/collabspace';
 
 export async function connectDB() {
   try {
