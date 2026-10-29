@@ -22,7 +22,11 @@ export function SocketProvider({ children }) {
     }
 
     // Initialize socket connection
-    const newSocket = io({
+    const socketUrl = import.meta.env.VITE_API_URL 
+      ? import.meta.env.VITE_API_URL.replace(/\/+$/, '') 
+      : undefined;
+
+    const newSocket = io(socketUrl, {
       auth: { token },
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 10,
