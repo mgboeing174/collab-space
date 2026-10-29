@@ -27,6 +27,7 @@ export async function authenticateToken(req, res, next) {
         email: user.email,
         name: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         bio: user.bio || ''
       };
 

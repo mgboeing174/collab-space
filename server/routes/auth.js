@@ -44,6 +44,7 @@ router.post('/register', async (req, res) => {
       email: emailClean,
       passwordHash,
       avatarColor,
+      avatarIcon: 'user',
       bio: ''
     });
 
@@ -209,6 +210,7 @@ router.post('/login', async (req, res) => {
         email: user.email,
         name: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         bio: user.bio || ''
       }
     });
@@ -224,7 +226,7 @@ router.get('/me', authenticateToken, (req, res) => {
 
 router.put('/profile', authenticateToken, async (req, res) => {
   try {
-    const { name, bio, avatarColor } = req.body;
+    const { name, bio, avatarColor, avatarIcon } = req.body;
 
     const user = await User.findById(req.user.id);
     if (!user) {
@@ -234,6 +236,7 @@ router.put('/profile', authenticateToken, async (req, res) => {
     if (name) user.name = name.trim();
     if (bio !== undefined) user.bio = bio.trim();
     if (avatarColor) user.avatarColor = avatarColor;
+    if (avatarIcon) user.avatarIcon = avatarIcon;
 
     await user.save();
 
@@ -243,6 +246,7 @@ router.put('/profile', authenticateToken, async (req, res) => {
         email: user.email,
         name: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         bio: user.bio
       }
     });

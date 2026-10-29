@@ -317,7 +317,7 @@ export default function WorkspaceDetailPage() {
                 borderRadius: '6px'
               }}
             >
-              <Avatar name={m.name} color={m.avatar_color} size={24} />
+              <Avatar name={m.name} color={m.avatar_color} icon={m.avatar_icon} size={24} />
               <div>
                 <span style={{ fontSize: '12.5px', fontWeight: 500, color: '#111111' }}>{m.name}</span>
                 <span style={{ fontSize: '10.5px', color: '#888888', marginLeft: '6px' }}>({m.role})</span>

@@ -28,7 +28,13 @@ export default function InviteAcceptPage() {
         const res = await joinWorkspaceByCode(inviteCode);
         setStatus('success');
         setTimeout(() => {
-          navigate(`/workspace/${res.workspaceId}`);
+          if (res.targetType === 'document' || res.type === 'document') {
+            navigate(`/workspace/${res.workspaceId}/doc/${res.documentId}`);
+          } else if (res.targetType === 'whiteboard' || res.type === 'whiteboard') {
+            navigate(`/workspace/${res.workspaceId}/whiteboard/${res.whiteboardId}`);
+          } else {
+            navigate(`/workspace/${res.workspaceId}`);
+          }
         }, 1200);
       } catch (err) {
         setStatus('error');

@@ -1,20 +1,24 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Trash2, Users } from 'lucide-react';
+import { ArrowLeft, Trash2, Users, Share2 } from 'lucide-react';
 import { api } from '../utils/api.js';
 import { useSocket } from '../context/SocketContext.jsx';
 import { useWorkspace } from '../context/WorkspaceContext.jsx';
+import { useDialog } from '../context/DialogContext.jsx';
 import WhiteboardCanvas from '../components/whiteboard/WhiteboardCanvas.jsx';
 import Avatar from '../components/common/Avatar.jsx';
+import ShareResourceModal from '../components/common/ShareResourceModal.jsx';
 
 export default function WhiteboardPage() {
   const { workspaceId, whiteboardId } = useParams();
   const { socket } = useSocket();
   const { refreshCurrentWorkspace } = useWorkspace();
+  const { confirm, toast } = useDialog();
   const navigate = useNavigate();
 
   const [whiteboard, setWhiteboard] = useState(null);
   const [activeBoardUsers, setActiveBoardUsers] = useState([]);
+  const [shareModalOpen, setShareModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -67,15 +71,22 @@ export default function WhiteboardPage() {
   };
 
   const handleDelete = async () => {
-    const confirm = window.confirm(`Permanently delete whiteboard "${whiteboard?.title}"?`);
-    if (!confirm) return;
+    const ok = await confirm({
+      title: `Delete "${whiteboard?.title}"?`,
+      message: 'This collaborative whiteboard and all its elements will be permanently deleted.',
+      confirmText: 'Delete Whiteboard',
+      isDestructive: true
+    });
+    if (!ok) return;
 
     try {
       await api.delete(`/whiteboards/${whiteboardId}`);
       await refreshCurrentWorkspace();
+      toast({ title: 'Whiteboard deleted', type: 'info' });
       navigate(`/workspace/${workspaceId}`);
     } catch (err) {
       console.error('Failed to delete whiteboard:', err);
+      toast({ title: 'Delete failed', message: err.message, type: 'error' });
     }
   };
 
@@ -158,7 +169,7 @@ export default function WhiteboardPage() {
               <div style={{ display: 'flex', marginLeft: '2px' }}>
                 {activeBoardUsers.slice(0, 3).map((u, i) => (
                   <div key={u.userId || i} style={{ marginLeft: i > 0 ? '-6px' : 0 }}>
-                    <Avatar name={u.userName} color={u.avatarColor} size={20} />
+                    <Avatar name={u.userName} color={u.avatarColor} icon={u.avatarIcon} size={20} />
                   </div>
                 ))}
               </div>
@@ -167,6 +178,11 @@ export default function WhiteboardPage() {
               </span>
             </div>
           )}
+
+          <button onClick={() => setShareModalOpen(true)} className="btn btn-secondary btn-sm" title="Share only this whiteboard">
+            <Share2 size={13} />
+            <span>Share</span>
+          </button>
 
           <button onClick={handleDelete} className="btn btn-ghost btn-sm" title="Delete whiteboard">
             <Trash2 size={13} color="#888888" />
@@ -182,6 +198,16 @@ export default function WhiteboardPage() {
           title={whiteboard.title}
         />
       </div>
+
+      {/* Share Whiteboard Modal */}
+      <ShareResourceModal
+        isOpen={shareModalOpen}
+        onClose={() => setShareModalOpen(false)}
+        title={whiteboard.title}
+        resourceType="whiteboard"
+        resourceId={whiteboardId}
+        shareCode={whiteboard.share_code || whiteboard.shareCode}
+      />
     </div>
   );
 }

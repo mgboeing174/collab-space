@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import Whiteboard from '../models/Whiteboard.js';
 import { logActivity } from '../db/database.js';
 import { authenticateToken } from '../middleware/auth.js';
@@ -47,6 +48,7 @@ router.post('/', requireWorkspaceMember(), async (req, res) => {
       workspaceId,
       projectId: projectId || null,
       title: title.trim(),
+      shareCode: crypto.randomBytes(6).toString('hex'),
       canvasData: [],
       version: 1,
       createdBy: req.user.id
@@ -89,6 +91,11 @@ router.get('/:id', requireWhiteboardAccess, async (req, res) => {
       .populate('createdBy', 'name')
       .populate('projectId', 'name');
 
+    if (!whiteboard.shareCode) {
+      whiteboard.shareCode = crypto.randomBytes(6).toString('hex');
+      await whiteboard.save();
+    }
+
     res.json({
       whiteboard: {
         id: whiteboard._id.toString(),
@@ -96,6 +103,7 @@ router.get('/:id', requireWhiteboardAccess, async (req, res) => {
         project_id: whiteboard.projectId ? whiteboard.projectId._id.toString() : null,
         project_name: whiteboard.projectId ? whiteboard.projectId.name : null,
         title: whiteboard.title,
+        share_code: whiteboard.shareCode,
         version: whiteboard.version,
         created_by: whiteboard.createdBy ? whiteboard.createdBy._id.toString() : null,
         creator_name: whiteboard.createdBy ? whiteboard.createdBy.name : 'Author',
@@ -155,6 +163,58 @@ router.delete('/:id', requireWhiteboardAccess, async (req, res) => {
   } catch (err) {
     console.error('Delete whiteboard error:', err);
     res.status(500).json({ error: 'Failed to delete whiteboard.' });
+  }
+});
+
+// Regenerate whiteboard share code
+router.post('/:id/share-code', requireWhiteboardAccess, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const whiteboard = req.whiteboard;
+    whiteboard.shareCode = crypto.randomBytes(6).toString('hex');
+    await whiteboard.save();
+    res.json({ shareCode: whiteboard.shareCode });
+  } catch (err) {
+    console.error('Regenerate whiteboard share code error:', err);
+    res.status(500).json({ error: 'Failed to regenerate share code.' });
+  }
+});
+
+// Join whiteboard directly by 12-char share code
+router.post('/join/:shareCode', async (req, res) => {
+  try {
+    const { shareCode } = req.params;
+    if (!shareCode) {
+      return res.status(400).json({ error: 'Share code is required.' });
+    }
+
+    const whiteboard = await Whiteboard.findOne({ shareCode: shareCode.trim() });
+    if (!whiteboard) {
+      return res.status(404).json({ error: 'Invalid share code or whiteboard not found.' });
+    }
+
+    const isCollaborator = (whiteboard.collaborators || []).some(
+      (c) => c.userId?.toString() === req.user.id
+    );
+
+    if (!isCollaborator && whiteboard.createdBy.toString() !== req.user.id) {
+      whiteboard.collaborators.push({
+        userId: req.user.id,
+        role: 'editor',
+        joinedAt: new Date()
+      });
+      await whiteboard.save();
+    }
+
+    res.json({
+      type: 'whiteboard',
+      whiteboardId: whiteboard._id.toString(),
+      workspaceId: whiteboard.workspaceId.toString(),
+      title: whiteboard.title
+    });
+  } catch (err) {
+    console.error('Join whiteboard error:', err);
+    res.status(500).json({ error: 'Failed to join whiteboard.' });
   }
 });
 

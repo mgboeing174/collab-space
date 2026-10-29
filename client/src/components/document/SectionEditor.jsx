@@ -24,6 +24,7 @@ import {
 import Avatar from '../common/Avatar.jsx';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { useSocket } from '../../context/SocketContext.jsx';
+import { useDialog } from '../../context/DialogContext.jsx';
 import { api } from '../../utils/api.js';
 
 export default function SectionEditor({
@@ -40,6 +41,7 @@ export default function SectionEditor({
 }) {
   const { user } = useAuth();
   const { socket } = useSocket();
+  const { prompt } = useDialog();
 
   const [title, setTitle] = useState(section.title || '');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -196,7 +198,8 @@ export default function SectionEditor({
           const res = await api.put(`/documents/${documentId}/sections/${section.id}`, {
             title: titleToSave,
             content: contentToSave,
-            expectedVersion: version
+            expectedVersion: version,
+            force: true
           });
 
           setVersion(res.section.version);
@@ -274,18 +277,21 @@ export default function SectionEditor({
     >
       {/* Section Header Bar */}
       <div
+        className="section-header-bar"
         style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: '8px',
           padding: '10px 14px',
           backgroundColor: isLockedByMe ? '#fafafa' : isLockedByOther ? '#f5f5f5' : '#ffffff',
           borderBottom: '1px solid #eeeeee'
         }}
       >
         {/* Left: Reorder controls & Title */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: '1 1 200px', minWidth: 0 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', flexShrink: 0 }}>
             <button
               onClick={onMoveUp}
               disabled={isFirst}
@@ -319,7 +325,8 @@ export default function SectionEditor({
                 fontWeight: 600,
                 padding: '2px 6px',
                 height: '28px',
-                maxWidth: '260px'
+                maxWidth: '260px',
+                width: '100%'
               }}
             />
           ) : (
@@ -332,18 +339,20 @@ export default function SectionEditor({
                 cursor: isLockedByOther ? 'default' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '6px'
+                gap: '6px',
+                wordBreak: 'break-word',
+                lineHeight: 1.3
               }}
               title="Click to edit section title"
             >
               <span>{title}</span>
-              <span style={{ fontSize: '11px', color: '#888888', fontWeight: 400 }}>v{version}</span>
+              <span style={{ fontSize: '11px', color: '#888888', fontWeight: 400, flexShrink: 0 }}>v{version}</span>
             </div>
           )}
         </div>
 
         {/* Right: Section Ownership Assignment & Lock State */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           {/* Assignment Dropdown */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
             <User size={13} color="#777777" />
@@ -358,7 +367,8 @@ export default function SectionEditor({
                 borderRadius: '4px',
                 color: assignedTo ? '#111111' : '#777777',
                 fontWeight: assignedTo ? 500 : 400,
-                cursor: 'pointer'
+                cursor: 'pointer',
+                maxWidth: '130px'
               }}
             >
               <option value="">Unassigned</option>
@@ -478,8 +488,12 @@ export default function SectionEditor({
             <Code size={13} />
           </button>
           <button
-            onClick={() => {
-              const url = window.prompt('Enter link URL:');
+            onClick={async () => {
+              const url = await prompt({
+                title: 'Insert Link',
+                message: 'Enter destination URL for selected text:',
+                placeholder: 'https://example.com'
+              });
               if (url) execFormat('createLink', url);
             }}
             className="toolbar-btn"

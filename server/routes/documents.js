@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import Document from '../models/Document.js';
 import DocumentVersion from '../models/DocumentVersion.js';
 import Workspace from '../models/Workspace.js';
@@ -15,25 +16,23 @@ router.use(authenticateToken);
 async function cleanExpiredLocks(documentId) {
   try {
     const cutoff = new Date(Date.now() - 60000);
-    await Document.updateOne(
-      { _id: documentId },
-      {
-        $set: {
-          'sections.$[elem].lockedBy': null,
-          'sections.$[elem].lockedByName': null,
-          'sections.$[elem].lockedAt': null,
-          'sections.$[elem].lockHeartbeat': null
-        }
-      },
-      {
-        arrayFilters: [
-          {
-            'elem.lockedAt': { $ne: null },
-            $or: [{ 'elem.lockHeartbeat': { $lt: cutoff } }, { 'elem.lockHeartbeat': null }]
-          }
-        ]
+    const doc = await Document.findById(documentId);
+    if (!doc || !doc.sections) return;
+
+    let modified = false;
+    for (const sec of doc.sections) {
+      if (sec.lockedAt && (!sec.lockHeartbeat || sec.lockHeartbeat < cutoff)) {
+        sec.lockedBy = null;
+        sec.lockedByName = null;
+        sec.lockedAt = null;
+        sec.lockHeartbeat = null;
+        modified = true;
       }
-    );
+    }
+
+    if (modified) {
+      await doc.save();
+    }
   } catch (err) {
     console.error('Error cleaning expired locks:', err);
   }
@@ -98,6 +97,7 @@ router.post('/', requireWorkspaceMember(), async (req, res) => {
       projectId: projectId || null,
       title: docTitle,
       templateType,
+      shareCode: crypto.randomBytes(6).toString('hex'),
       version: 1,
       createdBy: req.user.id,
       sections: sectionsToInsert
@@ -132,6 +132,7 @@ router.post('/', requireWorkspaceMember(), async (req, res) => {
         project_id: doc.projectId ? doc.projectId.toString() : null,
         title: doc.title,
         template_type: doc.templateType,
+        share_code: doc.shareCode,
         version: doc.version,
         created_by: doc.createdBy.toString(),
         created_at: doc.createdAt.toISOString(),
@@ -154,13 +155,19 @@ router.get('/:id', requireDocumentAccess, async (req, res) => {
       .populate('createdBy', 'name')
       .populate('projectId', 'name');
 
+    if (!doc.shareCode) {
+      doc.shareCode = crypto.randomBytes(6).toString('hex');
+      await doc.save();
+    }
+
     // Get workspace members
-    const workspace = await Workspace.findById(doc.workspaceId).populate('members.userId', 'name email avatarColor');
+    const workspace = await Workspace.findById(doc.workspaceId).populate('members.userId', 'name email avatarColor avatarIcon');
     const workspaceMembers = workspace.members.map((m) => ({
       id: m.userId?._id?.toString() || m.userId?.toString(),
       name: m.userId?.name || 'User',
       email: m.userId?.email || '',
       avatar_color: m.userId?.avatarColor || '#111111',
+      avatar_icon: m.userId?.avatarIcon || 'user',
       role: m.role
     }));
 
@@ -191,6 +198,7 @@ router.get('/:id', requireDocumentAccess, async (req, res) => {
         project_name: doc.projectId ? doc.projectId.name : null,
         title: doc.title,
         template_type: doc.templateType,
+        share_code: doc.shareCode,
         version: doc.version,
         created_by: doc.createdBy ? doc.createdBy._id.toString() : null,
         creator_name: doc.createdBy ? doc.createdBy.name : 'Author',
@@ -279,21 +287,45 @@ router.post('/:id/sections', requireDocumentAccess, async (req, res) => {
       assignedName = u ? u.name : null;
     }
 
+    // Helper: detect if a section is a footer section
+    const isFooter = (s) => {
+      const t = (s.title || '').toLowerCase();
+      const k = (s.sectionKey || '').toLowerCase();
+      return t.includes('footer') || k.includes('footer');
+    };
+
+    const isNewFooter = (title || '').toLowerCase().includes('footer');
+
+    // Find if the document already has a footer section
+    const existingFooterIdx = doc.sections.findIndex((s) => isFooter(s));
+
+    let insertIndex = doc.sections.length;
+    // If a footer already exists and the new section is NOT a footer, insert before the footer!
+    if (existingFooterIdx !== -1 && !isNewFooter) {
+      insertIndex = existingFooterIdx;
+    }
+
     const newSection = {
       sectionKey: `section-${Date.now()}`,
       title: title.trim(),
       content,
-      orderIndex: doc.sections.length,
+      orderIndex: insertIndex,
       assignedTo: assignedTo || null,
       assignedName,
       version: 1,
       updatedAt: new Date()
     };
 
-    doc.sections.push(newSection);
+    doc.sections.splice(insertIndex, 0, newSection);
+
+    // Re-index orderIndex for all sections so they remain contiguous
+    doc.sections.forEach((s, idx) => {
+      s.orderIndex = idx;
+    });
+
     await doc.save();
 
-    const added = doc.sections[doc.sections.length - 1];
+    const added = doc.sections[insertIndex];
 
     await logActivity({
       workspaceId: doc.workspaceId,
@@ -306,22 +338,43 @@ router.post('/:id/sections', requireDocumentAccess, async (req, res) => {
       details: `Added new section to "${doc.title}"`
     });
 
+    const formattedAdded = {
+      id: added._id.toString(),
+      document_id: doc._id.toString(),
+      section_key: added.sectionKey,
+      title: added.title,
+      content: added.content,
+      order_index: added.orderIndex,
+      assigned_to: added.assignedTo ? added.assignedTo.toString() : null,
+      assigned_name: added.assignedName,
+      locked_by: null,
+      locked_by_name: null,
+      locked_at: null,
+      version: added.version,
+      updated_at: added.updatedAt.toISOString()
+    };
+
+    // Broadcast newly added section in real-time to all collaborators viewing this document
+    if (req.io) {
+      req.io.to(`doc:${doc._id.toString()}`).emit('section_added', {
+        documentId: doc._id.toString(),
+        section: formattedAdded,
+        creatorId: req.user.id
+      });
+    }
+
+    // Broadcast reordered section IDs so all clients update their view immediately
+    if (req.io) {
+      const sectionIds = doc.sections.map((s) => s._id.toString());
+      req.io.to(`doc:${doc._id.toString()}`).emit('sections_order_updated', {
+        documentId: doc._id.toString(),
+        sectionIds
+      });
+    }
+
     res.status(201).json({
-      section: {
-        id: added._id.toString(),
-        document_id: doc._id.toString(),
-        section_key: added.sectionKey,
-        title: added.title,
-        content: added.content,
-        order_index: added.orderIndex,
-        assigned_to: added.assignedTo ? added.assignedTo.toString() : null,
-        assigned_name: added.assignedName,
-        locked_by: null,
-        locked_by_name: null,
-        locked_at: null,
-        version: added.version,
-        updated_at: added.updatedAt.toISOString()
-      }
+      section: formattedAdded,
+      sectionIds: doc.sections.map((s) => s._id.toString())
     });
   } catch (err) {
     console.error('Add section error:', err);
@@ -352,8 +405,10 @@ router.put('/:id/sections/:sectionId', requireDocumentAccess, async (req, res) =
       });
     }
 
-    // Optimistic version check
-    if (!force && expectedVersion !== undefined && section.version !== expectedVersion) {
+    // Optimistic version check:
+    // If the client's version is behind because of a prior save by the same locked user,
+    // or if force is true, allow update and advance version.
+    if (!force && expectedVersion !== undefined && section.version > expectedVersion && section.lockedBy?.toString() !== req.user.id) {
       return res.status(409).json({
         error: 'Section was modified by another collaborator. Please refresh or merge changes.',
         serverVersion: section.version,
@@ -423,6 +478,14 @@ router.delete('/:id/sections/:sectionId', requireDocumentAccess, async (req, res
       entityTitle: title,
       details: `Removed section from "${doc.title}"`
     });
+
+    // Broadcast deleted section in real-time
+    if (req.io) {
+      req.io.to(`doc:${doc._id.toString()}`).emit('section_deleted', {
+        documentId: doc._id.toString(),
+        sectionId
+      });
+    }
 
     res.json({ message: 'Section removed.' });
   } catch (err) {
@@ -724,6 +787,58 @@ router.post('/:id/versions/:versionId/restore', requireDocumentAccess, async (re
   } catch (err) {
     console.error('Restore version error:', err);
     res.status(500).json({ error: 'Failed to restore document version.' });
+  }
+});
+
+// Regenerate document share code
+router.post('/:id/share-code', requireDocumentAccess, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const doc = req.document;
+    doc.shareCode = crypto.randomBytes(6).toString('hex');
+    await doc.save();
+    res.json({ shareCode: doc.shareCode });
+  } catch (err) {
+    console.error('Regenerate document share code error:', err);
+    res.status(500).json({ error: 'Failed to regenerate share code.' });
+  }
+});
+
+// Join document directly by 12-char share code
+router.post('/join/:shareCode', async (req, res) => {
+  try {
+    const { shareCode } = req.params;
+    if (!shareCode) {
+      return res.status(400).json({ error: 'Share code is required.' });
+    }
+
+    const doc = await Document.findOne({ shareCode: shareCode.trim() });
+    if (!doc) {
+      return res.status(404).json({ error: 'Invalid share code or document not found.' });
+    }
+
+    const isCollaborator = (doc.collaborators || []).some(
+      (c) => c.userId?.toString() === req.user.id
+    );
+
+    if (!isCollaborator && doc.createdBy.toString() !== req.user.id) {
+      doc.collaborators.push({
+        userId: req.user.id,
+        role: 'editor',
+        joinedAt: new Date()
+      });
+      await doc.save();
+    }
+
+    res.json({
+      type: 'document',
+      documentId: doc._id.toString(),
+      workspaceId: doc.workspaceId.toString(),
+      title: doc.title
+    });
+  } catch (err) {
+    console.error('Join document error:', err);
+    res.status(500).json({ error: 'Failed to join document.' });
   }
 });
 

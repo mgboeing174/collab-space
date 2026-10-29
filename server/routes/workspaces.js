@@ -101,7 +101,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Join workspace by invite code
+// Join workspace by invite code (or unified code resolver)
 router.post('/join/:inviteCode', async (req, res) => {
   try {
     const { inviteCode } = req.params;
@@ -109,14 +109,65 @@ router.post('/join/:inviteCode', async (req, res) => {
       return res.status(400).json({ error: 'Invite code is required.' });
     }
 
-    const workspace = await Workspace.findOne({ inviteCode: inviteCode.trim() });
+    const code = inviteCode.trim();
+
+    // 1. Check if it's a direct document share code
+    const doc = await Document.findOne({ shareCode: code });
+    if (doc) {
+      const isCollab = (doc.collaborators || []).some((c) => c.userId?.toString() === req.user.id);
+      if (!isCollab && doc.createdBy.toString() !== req.user.id) {
+        doc.collaborators.push({
+          userId: req.user.id,
+          role: 'editor',
+          joinedAt: new Date()
+        });
+        await doc.save();
+      }
+
+      return res.json({
+        type: 'document',
+        targetType: 'document',
+        documentId: doc._id.toString(),
+        workspaceId: doc.workspaceId.toString(),
+        name: doc.title,
+        message: 'Joined document directly.'
+      });
+    }
+
+    // 2. Check if it's a direct whiteboard share code
+    const wb = await Whiteboard.findOne({ shareCode: code });
+    if (wb) {
+      const isCollab = (wb.collaborators || []).some((c) => c.userId?.toString() === req.user.id);
+      if (!isCollab && wb.createdBy.toString() !== req.user.id) {
+        wb.collaborators.push({
+          userId: req.user.id,
+          role: 'editor',
+          joinedAt: new Date()
+        });
+        await wb.save();
+      }
+
+      return res.json({
+        type: 'whiteboard',
+        targetType: 'whiteboard',
+        whiteboardId: wb._id.toString(),
+        workspaceId: wb.workspaceId.toString(),
+        name: wb.title,
+        message: 'Joined whiteboard directly.'
+      });
+    }
+
+    // 3. Check workspace invite code
+    const workspace = await Workspace.findOne({ inviteCode: code });
     if (!workspace) {
-      return res.status(404).json({ error: 'Invalid invitation code or workspace does not exist.' });
+      return res.status(404).json({ error: 'Invalid invitation code. No matching workspace, document, or whiteboard found.' });
     }
 
     const existingMember = workspace.members.find((m) => m.userId.toString() === req.user.id);
     if (existingMember) {
       return res.json({
+        type: 'workspace',
+        targetType: 'workspace',
         message: 'You are already a member of this workspace.',
         workspaceId: workspace._id.toString(),
         role: existingMember.role
@@ -142,6 +193,8 @@ router.post('/join/:inviteCode', async (req, res) => {
     });
 
     res.json({
+      type: 'workspace',
+      targetType: 'workspace',
       message: 'Successfully joined workspace.',
       workspaceId: workspace._id.toString(),
       name: workspace.name,
@@ -157,7 +210,7 @@ router.post('/join/:inviteCode', async (req, res) => {
 router.get('/:workspaceId', requireWorkspaceMember(), async (req, res) => {
   try {
     const { workspaceId } = req.params;
-    const workspace = await Workspace.findById(workspaceId).populate('members.userId', 'name email avatarColor bio');
+    const workspace = await Workspace.findById(workspaceId).populate('members.userId', 'name email avatarColor avatarIcon bio');
 
     const projects = await Project.find({ workspaceId }).sort({ createdAt: 1 });
     const documents = await Document.find({ workspaceId }).populate('createdBy', 'name').sort({ updatedAt: -1 });
@@ -169,6 +222,7 @@ router.get('/:workspaceId', requireWorkspaceMember(), async (req, res) => {
       name: m.userId?.name || 'User',
       email: m.userId?.email || '',
       avatar_color: m.userId?.avatarColor || '#111111',
+      avatar_icon: m.userId?.avatarIcon || 'user',
       bio: m.userId?.bio || '',
       role: m.role,
       joined_at: m.joinedAt.toISOString()

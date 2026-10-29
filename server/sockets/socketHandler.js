@@ -30,7 +30,8 @@ export function setupSockets(io) {
           id: user._id.toString(),
           name: user.name,
           email: user.email,
-          avatarColor: user.avatarColor
+          avatarColor: user.avatarColor,
+          avatarIcon: user.avatarIcon || 'user'
         };
         next();
       });
@@ -68,6 +69,7 @@ export function setupSockets(io) {
         userId: user.id,
         userName: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         joinedAt: Date.now()
       });
 
@@ -102,6 +104,7 @@ export function setupSockets(io) {
         userId: user.id,
         userName: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         cursor: null,
         activeSectionId: null
       });
@@ -120,6 +123,7 @@ export function setupSockets(io) {
         userId: user.id,
         userName: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         activeSectionId,
         cursor
       });
@@ -262,7 +266,7 @@ export function setupSockets(io) {
     });
 
     // WHITEBOARD COLLABORATION
-    socket.on('join_whiteboard', ({ whiteboardId }) => {
+    socket.on('join_whiteboard', async ({ whiteboardId }) => {
       if (!whiteboardId) return;
 
       const roomKey = `board:${whiteboardId}`;
@@ -276,11 +280,22 @@ export function setupSockets(io) {
         userId: user.id,
         userName: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         cursor: null
       });
 
       const wbUsers = Array.from(roomPresence.get(roomKey).values());
       io.to(roomKey).emit('whiteboard_presence_update', { whiteboardId, activeUsers: wbUsers });
+
+      // Send latest canvas state directly to the connecting user
+      try {
+        const wb = await Whiteboard.findById(whiteboardId);
+        if (wb && wb.canvasData) {
+          socket.emit('whiteboard_initial_state', { whiteboardId, elements: wb.canvasData });
+        }
+      } catch (err) {
+        console.error('Error fetching initial whiteboard state for new collaborator:', err);
+      }
     });
 
     socket.on('leave_whiteboard', ({ whiteboardId }) => {
@@ -301,14 +316,34 @@ export function setupSockets(io) {
         userId: user.id,
         userName: user.name,
         avatarColor: user.avatarColor,
+        avatarIcon: user.avatarIcon || 'user',
         x,
         y
       });
     });
 
-    socket.on('whiteboard_element_add', ({ whiteboardId, element }) => {
+    socket.on('whiteboard_element_add', async ({ whiteboardId, element }) => {
       const roomKey = `board:${whiteboardId}`;
       socket.to(roomKey).emit('whiteboard_element_added', { whiteboardId, element });
+
+      // Immediate backend persistence with deduplication
+      try {
+        await Whiteboard.updateOne(
+          { _id: whiteboardId },
+          {
+            $pull: { canvasData: { id: element.id } }
+          }
+        );
+        await Whiteboard.updateOne(
+          { _id: whiteboardId },
+          {
+            $push: { canvasData: element },
+            $inc: { version: 1 }
+          }
+        );
+      } catch (err) {
+        console.error('Error persisting whiteboard_element_add:', err);
+      }
     });
 
     socket.on('whiteboard_element_live_draw', ({ whiteboardId, element }) => {
@@ -316,14 +351,38 @@ export function setupSockets(io) {
       socket.to(roomKey).emit('whiteboard_element_live_drawing', { whiteboardId, element });
     });
 
-    socket.on('whiteboard_element_update', ({ whiteboardId, element }) => {
+    socket.on('whiteboard_element_update', async ({ whiteboardId, element }) => {
       const roomKey = `board:${whiteboardId}`;
       socket.to(roomKey).emit('whiteboard_element_updated', { whiteboardId, element });
+
+      try {
+        await Whiteboard.updateOne(
+          { _id: whiteboardId, 'canvasData.id': element.id },
+          {
+            $set: { 'canvasData.$': element },
+            $inc: { version: 1 }
+          }
+        );
+      } catch (err) {
+        console.error('Error updating whiteboard element:', err);
+      }
     });
 
-    socket.on('whiteboard_element_delete', ({ whiteboardId, elementId }) => {
+    socket.on('whiteboard_element_delete', async ({ whiteboardId, elementId }) => {
       const roomKey = `board:${whiteboardId}`;
       socket.to(roomKey).emit('whiteboard_element_deleted', { whiteboardId, elementId });
+
+      try {
+        await Whiteboard.updateOne(
+          { _id: whiteboardId },
+          {
+            $pull: { canvasData: { id: elementId } },
+            $inc: { version: 1 }
+          }
+        );
+      } catch (err) {
+        console.error('Error deleting whiteboard element:', err);
+      }
     });
 
     socket.on('whiteboard_elements_bulk_sync', async ({ whiteboardId, elements }) => {

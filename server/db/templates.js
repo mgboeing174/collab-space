@@ -1,4 +1,9 @@
 export const DOCUMENT_TEMPLATES = {
+  'freestyle': {
+    name: 'Freestyle (Blank Canvas)',
+    description: 'Empty collaborative canvas. Assemble sections freely using pre-built structural components.',
+    sections: []
+  },
   'header-body-footer': {
     name: 'Header → Body → Footer',
     description: 'Clean standard 3-tier document layout',

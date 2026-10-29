@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   MousePointer,
   Edit2,
@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.jsx';
 import { useSocket } from '../../context/SocketContext.jsx';
+import { useDialog } from '../../context/DialogContext.jsx';
 import { api } from '../../utils/api.js';
 
 const GRAYSCALE_COLORS = [
@@ -37,6 +38,7 @@ const GRAYSCALE_COLORS = [
 export default function WhiteboardCanvas({ whiteboardId, initialElements = [], title = 'Whiteboard' }) {
   const { user } = useAuth();
   const { socket } = useSocket();
+  const { prompt } = useDialog();
 
   const [elements, setElements] = useState(initialElements);
   const [selectedTool, setSelectedTool] = useState('select'); // select, pen, rectangle, circle, diamond, line, arrow, text, sticky, eraser
@@ -78,8 +80,6 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
   // Socket.IO real-time collaboration
   useEffect(() => {
     if (!socket || !whiteboardId) return;
-
-    socket.emit('join_whiteboard', { whiteboardId });
 
     const handleRemoteCursor = (data) => {
       if (data.userId !== user?.id) {
@@ -134,6 +134,19 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
       }
     };
 
+    const handleInitialState = ({ whiteboardId: wbId, elements: initElements }) => {
+      if (wbId === whiteboardId && Array.isArray(initElements)) {
+        setElements((prev) => {
+          // Merge server elements without discarding freshly drawn in-flight local shapes
+          const map = new Map();
+          initElements.forEach((el) => map.set(el.id, el));
+          prev.forEach((el) => map.set(el.id, el));
+          return Array.from(map.values());
+        });
+      }
+    };
+
+    socket.on('whiteboard_initial_state', handleInitialState);
     socket.on('whiteboard_cursor_update', handleRemoteCursor);
     socket.on('whiteboard_element_added', handleElementAdded);
     socket.on('whiteboard_element_live_drawing', handleElementLiveDrawing);
@@ -142,7 +155,7 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
     socket.on('whiteboard_synced', handleWhiteboardSynced);
 
     return () => {
-      socket.emit('leave_whiteboard', { whiteboardId });
+      socket.off('whiteboard_initial_state', handleInitialState);
       socket.off('whiteboard_cursor_update', handleRemoteCursor);
       socket.off('whiteboard_element_added', handleElementAdded);
       socket.off('whiteboard_element_live_drawing', handleElementLiveDrawing);
@@ -344,41 +357,51 @@ export default function WhiteboardCanvas({ whiteboardId, initialElements = [], t
         strokeWidth
       };
     } else if (selectedTool === 'text') {
-      const textVal = window.prompt('Enter text note:');
-      if (textVal) {
-        newEl = {
-          id,
-          type: 'text',
-          x: coords.x,
-          y: coords.y,
-          text: textVal,
-          strokeColor: activeColor,
-          fontSize: 16
-        };
-        const next = [...elements, newEl];
-        pushHistory(next);
-        if (socket) socket.emit('whiteboard_element_add', { whiteboardId, element: newEl });
-      }
+      prompt({
+        title: 'Add Text Note',
+        message: 'Enter text to place on canvas:',
+        placeholder: 'Type something...'
+      }).then((textVal) => {
+        if (textVal) {
+          const textEl = {
+            id,
+            type: 'text',
+            x: coords.x,
+            y: coords.y,
+            text: textVal,
+            strokeColor: activeColor,
+            fontSize: 16
+          };
+          const next = [...elements, textEl];
+          pushHistory(next);
+          if (socket) socket.emit('whiteboard_element_add', { whiteboardId, element: textEl });
+        }
+      });
       isDrawingRef.current = false;
       return;
     } else if (selectedTool === 'sticky') {
-      const noteVal = window.prompt('Enter sticky note content:');
-      if (noteVal !== null) {
-        newEl = {
-          id,
-          type: 'sticky',
-          x: coords.x - 90,
-          y: coords.y - 70,
-          width: 180,
-          height: 140,
-          text: noteVal || 'New Note',
-          color: activeFill === 'transparent' ? '#f5f5f5' : activeFill,
-          strokeColor: activeColor
-        };
-        const next = [...elements, newEl];
-        pushHistory(next);
-        if (socket) socket.emit('whiteboard_element_add', { whiteboardId, element: newEl });
-      }
+      prompt({
+        title: 'Add Sticky Note',
+        message: 'Enter sticky note content:',
+        placeholder: 'Sprint idea, reminder...'
+      }).then((noteVal) => {
+        if (noteVal !== null && noteVal !== undefined) {
+          const stickyEl = {
+            id,
+            type: 'sticky',
+            x: coords.x - 90,
+            y: coords.y - 70,
+            width: 180,
+            height: 140,
+            text: noteVal || 'New Note',
+            color: activeFill === 'transparent' ? '#f5f5f5' : activeFill,
+            strokeColor: activeColor
+          };
+          const next = [...elements, stickyEl];
+          pushHistory(next);
+          if (socket) socket.emit('whiteboard_element_add', { whiteboardId, element: stickyEl });
+        }
+      });
       isDrawingRef.current = false;
       return;
     }

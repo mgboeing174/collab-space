@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, User, Save, Check } from 'lucide-react';
+import { ArrowLeft, Save, Check } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
-import Avatar from '../components/common/Avatar.jsx';
+import Avatar, { AVATAR_ICONS } from '../components/common/Avatar.jsx';
 
 const GRAYSCALE_AVATARS = [
   '#111111', '#242424', '#383838', '#4c4c4c', '#606060', '#747474'
@@ -15,6 +15,7 @@ export default function ProfilePage() {
   const [name, setName] = useState(user?.name || '');
   const [bio, setBio] = useState(user?.bio || '');
   const [avatarColor, setAvatarColor] = useState(user?.avatarColor || '#111111');
+  const [avatarIcon, setAvatarIcon] = useState(user?.avatarIcon || 'user');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -24,7 +25,7 @@ export default function ProfilePage() {
 
     try {
       setSaving(true);
-      await updateProfile({ name: name.trim(), bio: bio.trim(), avatarColor });
+      await updateProfile({ name: name.trim(), bio: bio.trim(), avatarColor, avatarIcon });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -63,14 +64,14 @@ export default function ProfilePage() {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '24px' }}>
-          <Avatar name={name || user?.name} color={avatarColor} size={52} />
+          <Avatar name={name || user?.name} color={avatarColor} icon={avatarIcon} size={56} />
           <div>
             <div style={{ fontSize: '15px', fontWeight: 600, color: '#111111' }}>{user?.email}</div>
             <div style={{ fontSize: '12px', color: '#888888' }}>Member since 2026</div>
           </div>
         </div>
 
-        <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <div>
             <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#111111', marginBottom: '6px' }}>
               Full Name
@@ -95,6 +96,40 @@ export default function ProfilePage() {
               rows={2}
               style={{ width: '100%' }}
             />
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#111111', marginBottom: '8px' }}>
+              Choose Avatar Character / Icon
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(44px, 1fr))', gap: '8px', maxWidth: '380px' }}>
+              {AVATAR_ICONS.map((item) => {
+                const Icon = item.icon;
+                const isSelected = avatarIcon === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setAvatarIcon(item.id)}
+                    title={item.label}
+                    style={{
+                      height: '44px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      borderRadius: '8px',
+                      border: isSelected ? '2px solid #111111' : '1px solid #e0e0e0',
+                      backgroundColor: isSelected ? '#f5f5f5' : '#ffffff',
+                      color: isSelected ? '#111111' : '#666666',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    <Icon size={20} strokeWidth={isSelected ? 2.5 : 2} />
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div>

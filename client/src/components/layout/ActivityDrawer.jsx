@@ -115,7 +115,7 @@ export default function ActivityDrawer({ isOpen, onClose }) {
                   onMouseEnter={(e) => (e.currentTarget.style.borderColor = '#e0e0e0')}
                   onMouseLeave={(e) => (e.currentTarget.style.borderColor = '#f0f0f0')}
                 >
-                  <Avatar name={a.user_name} color={a.avatar_color} size={28} />
+                  <Avatar name={a.user_name} color={a.avatar_color} icon={a.avatar_icon} size={28} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2px' }}>
                       <span style={{ fontSize: '12.5px', fontWeight: 600, color: '#111111' }}>{a.user_name}</span>

@@ -9,7 +9,9 @@ import {
   Layout,
   KeyRound,
   Shield,
-  Clock
+  Clock,
+  LogOut,
+  User
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext.jsx';
 import Modal from '../components/common/Modal.jsx';
@@ -18,12 +20,13 @@ import { useAuth } from '../context/AuthContext.jsx';
 
 export default function WorkspacesPage() {
   const { workspaces, createWorkspace, joinWorkspaceByCode, switchWorkspace, loading } = useWorkspace();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [joinModalOpen, setJoinModalOpen] = useState(false);
+  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const [wsName, setWsName] = useState('');
   const [wsDesc, setWsDesc] = useState('');
   const [inviteCode, setInviteCode] = useState('');
@@ -65,7 +68,13 @@ export default function WorkspacesPage() {
       const res = await joinWorkspaceByCode(inviteCode.trim());
       setJoinModalOpen(false);
       setInviteCode('');
-      navigate(`/workspace/${res.workspaceId}`);
+      if (res.targetType === 'document' || res.type === 'document') {
+        navigate(`/workspace/${res.workspaceId}/doc/${res.documentId}`);
+      } else if (res.targetType === 'whiteboard' || res.type === 'whiteboard') {
+        navigate(`/workspace/${res.workspaceId}/whiteboard/${res.whiteboardId}`);
+      } else {
+        navigate(`/workspace/${res.workspaceId}`);
+      }
     } catch (err) {
       setError(err.message || 'Invalid or expired invitation code.');
     } finally {
@@ -79,29 +88,171 @@ export default function WorkspacesPage() {
   };
 
   return (
-    <div style={{ maxWidth: '960px', margin: '40px auto', padding: '0 24px' }}>
-      {/* Page Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '32px' }}>
-        <div>
-          <h1 style={{ fontSize: '26px', fontWeight: 700, letterSpacing: '-0.03em', color: '#111111' }}>
-            Workspaces
-          </h1>
-          <p style={{ fontSize: '13.5px', color: '#666666', marginTop: '4px' }}>
-            Select a collaborative space or create one for your team
-          </p>
+    <div style={{ minHeight: '100vh', backgroundColor: '#fafafa' }}>
+      {/* Top Navigation Bar */}
+      <header
+        style={{
+          height: '54px',
+          backgroundColor: '#ffffff',
+          borderBottom: '1px solid #e5e5e5',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 24px',
+          position: 'sticky',
+          top: 0,
+          zIndex: 100
+        }}
+      >
+        {/* Brand */}
+        <div
+          onClick={() => navigate('/workspaces')}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            cursor: 'pointer',
+            fontWeight: 700,
+            fontSize: '15px',
+            letterSpacing: '-0.03em',
+            color: '#111111'
+          }}
+        >
+          <div
+            style={{
+              width: '26px',
+              height: '26px',
+              background: '#111111',
+              borderRadius: '5px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#ffffff'
+            }}
+          >
+            <Layers size={15} />
+          </div>
+          <span>CollabSpace</span>
         </div>
 
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={() => setJoinModalOpen(true)} className="btn btn-secondary">
-            <KeyRound size={14} />
-            <span>Join via Code</span>
+        {/* Right User Menu */}
+        <div style={{ position: 'relative' }}>
+          <button
+            onClick={() => setUserDropdownOpen(!userDropdownOpen)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              cursor: 'pointer',
+              background: 'transparent',
+              border: 'none',
+              padding: '4px 6px',
+              borderRadius: '6px'
+            }}
+          >
+            <Avatar name={user?.name} color={user?.avatarColor} icon={user?.avatarIcon} size={28} />
+            <span style={{ fontSize: '13px', fontWeight: 600, color: '#111111' }}>
+              {user?.name}
+            </span>
           </button>
-          <button onClick={() => setCreateModalOpen(true)} className="btn btn-primary">
-            <Plus size={14} />
-            <span>New Workspace</span>
-          </button>
+
+          {userDropdownOpen && (
+            <>
+              <div
+                style={{ position: 'fixed', inset: 0, zIndex: 99 }}
+                onClick={() => setUserDropdownOpen(false)}
+              />
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  right: 0,
+                  marginTop: '6px',
+                  width: '210px',
+                  backgroundColor: '#ffffff',
+                  border: '1px solid #e0e0e0',
+                  borderRadius: '8px',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.1)',
+                  zIndex: 100,
+                  overflow: 'hidden',
+                  padding: '6px'
+                }}
+              >
+                <div style={{ padding: '8px 10px', borderBottom: '1px solid #eeeeee' }}>
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: '#111111' }}>{user?.name}</div>
+                  <div style={{ fontSize: '11px', color: '#888888' }}>{user?.email}</div>
+                </div>
+
+                <div style={{ padding: '4px 0' }}>
+                  <button
+                    onClick={() => {
+                      setUserDropdownOpen(false);
+                      navigate('/profile');
+                    }}
+                    className="btn-ghost"
+                    style={{
+                      width: '100%',
+                      justifyContent: 'flex-start',
+                      padding: '8px 10px',
+                      fontSize: '12.5px',
+                      gap: '8px',
+                      color: '#333333'
+                    }}
+                  >
+                    <User size={14} />
+                    <span>Account Profile</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setUserDropdownOpen(false);
+                      logout();
+                      navigate('/login');
+                    }}
+                    className="btn-ghost"
+                    style={{
+                      width: '100%',
+                      justifyContent: 'flex-start',
+                      padding: '8px 10px',
+                      fontSize: '12.5px',
+                      gap: '8px',
+                      color: '#333333'
+                    }}
+                  >
+                    <LogOut size={14} />
+                    <span>Log Out</span>
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
-      </div>
+      </header>
+
+      {/* Main Page Body */}
+      <div style={{ maxWidth: '960px', margin: '36px auto', padding: '0 24px' }}>
+        {/* Page Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '32px' }}>
+          <div>
+            <h1 style={{ fontSize: '26px', fontWeight: 700, letterSpacing: '-0.03em', color: '#111111' }}>
+              Workspaces
+            </h1>
+            <p style={{ fontSize: '13.5px', color: '#666666', marginTop: '4px' }}>
+              Select a collaborative space or create one for your team
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button onClick={() => setJoinModalOpen(true)} className="btn btn-secondary">
+              <KeyRound size={14} />
+              <span>Join via Code</span>
+            </button>
+            <button onClick={() => setCreateModalOpen(true)} className="btn btn-primary">
+              <Plus size={14} />
+              <span>New Workspace</span>
+            </button>
+          </div>
+        </div>
 
       {/* Workspaces List */}
       {loading ? (
@@ -295,5 +446,6 @@ export default function WorkspacesPage() {
         </div>
       </Modal>
     </div>
+  </div>
   );
 }

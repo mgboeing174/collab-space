@@ -4,6 +4,7 @@ import { ArrowLeft, Users, Shield, Trash2, Save, Share2, Check } from 'lucide-re
 import { api } from '../utils/api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useWorkspace } from '../context/WorkspaceContext.jsx';
+import { useDialog } from '../context/DialogContext.jsx';
 import Avatar from '../components/common/Avatar.jsx';
 import InviteModal from '../components/workspace/InviteModal.jsx';
 
@@ -11,6 +12,7 @@ export default function WorkspaceSettingsPage() {
   const { workspaceId } = useParams();
   const { user } = useAuth();
   const { refreshWorkspaces, refreshCurrentWorkspace } = useWorkspace();
+  const { confirm, toast } = useDialog();
   const navigate = useNavigate();
 
   const [workspace, setWorkspace] = useState(null);
@@ -70,15 +72,22 @@ export default function WorkspaceSettingsPage() {
 
   const handleRemoveMember = async (targetUserId, memberName) => {
     const isSelf = user.id === targetUserId;
-    const confirm = window.confirm(
-      isSelf
-        ? 'Are you sure you want to leave this workspace?'
-        : `Remove ${memberName} from this workspace?`
-    );
-    if (!confirm) return;
+    const ok = await confirm({
+      title: isSelf ? 'Leave Workspace?' : `Remove ${memberName}?`,
+      message: isSelf
+        ? 'You will lose access to all documents and whiteboards in this workspace until re-invited.'
+        : `This will revoke ${memberName}'s access to all documents in this workspace.`,
+      confirmText: isSelf ? 'Leave Workspace' : 'Remove Member',
+      isDestructive: true
+    });
+    if (!ok) return;
 
     try {
       await api.delete(`/workspaces/${workspaceId}/members/${targetUserId}`);
+      toast({
+        title: isSelf ? 'Left workspace' : 'Member removed',
+        type: 'info'
+      });
       if (isSelf) {
         await refreshWorkspaces();
         navigate('/workspaces');
@@ -87,21 +96,27 @@ export default function WorkspaceSettingsPage() {
       }
     } catch (err) {
       console.error('Failed to remove member:', err);
+      toast({ title: 'Operation failed', message: err.message, type: 'error' });
     }
   };
 
   const handleDeleteWorkspace = async () => {
-    const confirm = window.confirm(
-      `Are you sure you want to PERMANENTLY delete "${workspace.name}"? All documents and whiteboards will be deleted.`
-    );
-    if (!confirm) return;
+    const ok = await confirm({
+      title: `Permanently delete "${workspace.name}"?`,
+      message: 'All documents, section versions, whiteboards, and project configurations within this workspace will be permanently erased. This action cannot be undone.',
+      confirmText: 'Delete Entire Workspace',
+      isDestructive: true
+    });
+    if (!ok) return;
 
     try {
       await api.delete(`/workspaces/${workspaceId}`);
       await refreshWorkspaces();
+      toast({ title: 'Workspace deleted', type: 'info' });
       navigate('/workspaces');
     } catch (err) {
       console.error('Failed to delete workspace:', err);
+      toast({ title: 'Delete failed', message: err.message, type: 'error' });
     }
   };
 
@@ -233,7 +248,7 @@ export default function WorkspaceSettingsPage() {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <Avatar name={m.name} color={m.avatar_color} size={30} />
+                  <Avatar name={m.name} color={m.avatar_color} icon={m.avatar_icon} size={30} />
                   <div>
                     <div style={{ fontSize: '13px', fontWeight: 600, color: '#111111' }}>
                       {m.name} {isSelf ? '(You)' : ''}

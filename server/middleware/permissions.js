@@ -66,15 +66,21 @@ export async function requireDocumentAccess(req, res, next) {
       (m) => m.userId.toString() === req.user.id
     );
 
-    if (!membership) {
+    // Also check direct document collaborator
+    const directCollab = (doc.collaborators || []).find(
+      (c) => c.userId?.toString() === req.user.id
+    );
+
+    if (!membership && !directCollab && doc.createdBy.toString() !== req.user.id) {
       return res.status(403).json({ error: 'You do not have access to this document.' });
     }
 
     req.document = doc;
     req.workspaceMember = {
       workspaceId: doc.workspaceId.toString(),
-      role: membership.role,
-      isOwner: membership.role === 'owner'
+      role: membership ? membership.role : (directCollab?.role || 'editor'),
+      isOwner: membership ? membership.role === 'owner' : false,
+      isDirectCollaborator: !membership && !!directCollab
     };
 
     next();
@@ -106,15 +112,20 @@ export async function requireWhiteboardAccess(req, res, next) {
       (m) => m.userId.toString() === req.user.id
     );
 
-    if (!membership) {
+    const directCollab = (whiteboard.collaborators || []).find(
+      (c) => c.userId?.toString() === req.user.id
+    );
+
+    if (!membership && !directCollab && whiteboard.createdBy.toString() !== req.user.id) {
       return res.status(403).json({ error: 'You do not have access to this whiteboard.' });
     }
 
     req.whiteboard = whiteboard;
     req.workspaceMember = {
       workspaceId: whiteboard.workspaceId.toString(),
-      role: membership.role,
-      isOwner: membership.role === 'owner'
+      role: membership ? membership.role : (directCollab?.role || 'editor'),
+      isOwner: membership ? membership.role === 'owner' : false,
+      isDirectCollaborator: !membership && !!directCollab
     };
 
     next();

@@ -1,11 +1,19 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, AlignLeft, CheckSquare, Briefcase, FileCode, Edit3, ArrowRight } from 'lucide-react';
+import { FileText, AlignLeft, CheckSquare, Briefcase, FileCode, Edit3, ArrowRight, Sparkles, Layers } from 'lucide-react';
 import Modal from '../common/Modal.jsx';
 import { api } from '../../utils/api.js';
 import { useWorkspace } from '../../context/WorkspaceContext.jsx';
 
 const TEMPLATES = [
+  {
+    id: 'freestyle',
+    name: 'Freestyle (Empty Document)',
+    badge: 'Blank Canvas',
+    description: 'Empty collaborative document. Build sections on the fly choosing from headers, body, subheadings, bullet points, checklists, and footers.',
+    sections: ['Header', 'Subheading', 'Body', 'Bullets', 'Checklist', 'Footer'],
+    icon: Sparkles
+  },
   {
     id: 'header-body-footer',
     name: 'Header → Body → Footer',

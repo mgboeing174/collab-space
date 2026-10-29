@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext.jsx';
 import { SocketProvider } from './context/SocketContext.jsx';
 import { WorkspaceProvider } from './context/WorkspaceContext.jsx';
+import { DialogProvider } from './context/DialogContext.jsx';
 
 import LoginPage from './pages/LoginPage.jsx';
 import RegisterPage from './pages/RegisterPage.jsx';
@@ -39,7 +40,8 @@ export default function App() {
       <AuthProvider>
         <SocketProvider>
           <WorkspaceProvider>
-            <Routes>
+            <DialogProvider>
+              <Routes>
               {/* Public Routes */}
               <Route path="/login" element={<LoginPage />} />
               <Route path="/register" element={<RegisterPage />} />
@@ -81,7 +83,8 @@ export default function App() {
               {/* Catch-all redirect */}
               <Route path="*" element={<Navigate to="/workspaces" replace />} />
             </Routes>
-          </WorkspaceProvider>
+          </DialogProvider>
+        </WorkspaceProvider>
         </SocketProvider>
       </AuthProvider>
     </BrowserRouter>

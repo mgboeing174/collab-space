@@ -253,7 +253,7 @@ export default function Navbar({ onToggleActivity, onToggleMobileSidebar, unread
               <div style={{ display: 'flex', marginLeft: '2px' }}>
                 {onlineMembers.slice(0, 4).map((m, idx) => (
                   <div key={m.userId || idx} style={{ marginLeft: idx > 0 ? '-6px' : '0' }}>
-                    <Avatar name={m.userName} color={m.avatarColor} size={22} />
+                    <Avatar name={m.userName} color={m.avatarColor} icon={m.avatarIcon} size={22} />
                   </div>
                 ))}
               </div>
@@ -309,9 +309,9 @@ export default function Navbar({ onToggleActivity, onToggleMobileSidebar, unread
           <div style={{ position: 'relative' }}>
             <button
               onClick={() => setUserDropdownOpen(!userDropdownOpen)}
-              style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', background: 'transparent', border: 'none', padding: 0 }}
             >
-              <Avatar name={user?.name} color={user?.avatarColor} size={28} />
+              <Avatar name={user?.name} color={user?.avatarColor} icon={user?.avatarIcon} size={28} />
             </button>
 
             {userDropdownOpen && (

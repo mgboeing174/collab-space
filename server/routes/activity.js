@@ -11,7 +11,7 @@ router.get('/workspace/:workspaceId', requireWorkspaceMember(), async (req, res)
   try {
     const { workspaceId } = req.params;
     const activities = await Activity.find({ workspaceId })
-      .populate('userId', 'avatarColor')
+      .populate('userId', 'avatarColor avatarIcon')
       .sort({ createdAt: -1 })
       .limit(60);
 
@@ -21,6 +21,7 @@ router.get('/workspace/:workspaceId', requireWorkspaceMember(), async (req, res)
       user_id: a.userId?._id?.toString() || a.userId?.toString(),
       user_name: a.userName,
       avatar_color: a.userId?.avatarColor || '#111111',
+      avatar_icon: a.userId?.avatarIcon || 'user',
       action: a.action,
       entity_type: a.entityType,
       entity_id: a.entityId,

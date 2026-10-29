@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { History, RotateCcw, Plus, Check, Clock, User } from 'lucide-react';
 import Modal from '../common/Modal.jsx';
+import { useDialog } from '../../context/DialogContext.jsx';
 import { api } from '../../utils/api.js';
 
 export default function VersionHistoryModal({ isOpen, onClose, documentId, onVersionRestored }) {
+  const { confirm, toast } = useDialog();
   const [versions, setVersions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [creatingSnapshot, setCreatingSnapshot] = useState(false);
@@ -46,8 +48,12 @@ export default function VersionHistoryModal({ isOpen, onClose, documentId, onVer
   };
 
   const handleRestore = async (version) => {
-    const confirm = window.confirm(`Restore document to Version ${version.version_number}? Current changes will be backed up.`);
-    if (!confirm) return;
+    const ok = await confirm({
+      title: `Restore to Version ${version.version_number}?`,
+      message: 'Restoring this snapshot will replace current section contents. An automated backup is created before restoring.',
+      confirmText: 'Restore Version'
+    });
+    if (!ok) return;
 
     try {
       setRestoringId(version.id);
@@ -55,9 +61,19 @@ export default function VersionHistoryModal({ isOpen, onClose, documentId, onVer
       if (onVersionRestored) {
         onVersionRestored(res.sections);
       }
+      toast({
+        title: 'Version Restored',
+        message: `Successfully rolled back to Version ${version.version_number}.`,
+        type: 'success'
+      });
       onClose();
     } catch (err) {
       console.error('Failed to restore version:', err);
+      toast({
+        title: 'Restore Failed',
+        message: err.message || 'Failed to restore document version.',
+        type: 'error'
+      });
     } finally {
       setRestoringId(null);
     }

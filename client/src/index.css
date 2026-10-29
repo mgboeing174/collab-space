@@ -412,4 +412,32 @@ input:focus, textarea:focus, select:focus {
     max-width: 96vw !important;
     overflow-x: auto !important;
   }
+
+  .document-editor-container {
+    padding: 16px 12px 60px !important;
+  }
+
+  .section-header-bar {
+    padding: 8px 10px !important;
+  }
+}
+
+@media (max-width: 600px) {
+  .section-header-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+  }
+
+  .section-header-bar > div:first-child {
+    width: 100% !important;
+    justify-content: flex-start !important;
+  }
+
+  .section-header-bar > div:last-child {
+    width: 100% !important;
+    justify-content: space-between !important;
+    border-top: 1px dashed #eeeeee;
+    padding-top: 8px;
+  }
 }
